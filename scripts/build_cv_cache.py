@@ -284,8 +284,28 @@ def render_markdown(cv: dict[str, Any]) -> str:
     lines = []
     lines.append(f"# {cv['display_name']}")
     lines.append('')
-    lines.append(f"*TrueSight DAO Credential Profile · generated {cv['generated_at']}*")
+
+    gov = cv.get('governance') or {}
+    pills = []
+    if gov.get('is_governor'):
+        pills.append('Governor')
+    if cv.get('has_dao_contributions'):
+        pills.append('DAO Contributor')
+    if cv.get('has_elective_records'):
+        pills.append('Practitioner')
+    if pills:
+        lines.append(f"*{' · '.join(pills)} · TrueSight DAO Credential Profile · generated {cv['generated_at']}*")
+    else:
+        lines.append(f"*TrueSight DAO Credential Profile · generated {cv['generated_at']}*")
     lines.append('')
+
+    narrative = (cv.get('narrative') or {}).get('text') if isinstance(cv.get('narrative'), dict) else ''
+    if narrative:
+        lines.append(narrative)
+        lines.append('')
+        model = (cv.get('narrative') or {}).get('model') or 'grok'
+        lines.append(f"*AI-generated summary from ledger data and practice events. Model: {model}.*")
+        lines.append('')
 
     if cv.get('has_dao_contributions'):
         dc = cv['dao_contributions']
@@ -453,23 +473,43 @@ def build(data_root: Path, write_pdfs: bool = True, write_narratives: bool = Tru
     narrative_errors = 0
     for slug, cv in sorted(cvs_by_slug.items()):
         # Generate or recover cached narrative BEFORE writing the JSON so
-        # the narrative is part of the unified CV. Skipped silently if
-        # HAS_GROK is False or write_narratives=False (e.g. local dry-run).
+        # the narrative is part of the unified CV.
+        #
+        # Idempotency rule: if the new generation FAILS (no API key,
+        # transient network error), preserve whatever narrative the
+        # previous build wrote. This is essential for CI runs that don't
+        # have GROK_API_KEY — without this, every CI rebuild would blank
+        # the narratives that a key-equipped local run had populated.
+        existing = read_json(cv_dir / f'{slug}.json') or {}
+        existing_narrative = existing.get('narrative') if isinstance(existing, dict) else None
         if HAS_GROK and write_narratives:
             n = _grok_generate_narrative(cv, grok_cache_dir)
             if n.get('error'):
                 narrative_errors += 1
+                if existing_narrative and existing_narrative.get('text'):
+                    cv['narrative'] = existing_narrative
             elif n.get('cached'):
                 narrative_hits += 1
+                cv['narrative'] = {
+                    'text': n.get('narrative') or '',
+                    'model': n.get('model') or '',
+                    'prompt_version': n.get('prompt_version') or '',
+                    'source_hash': n.get('source_hash') or '',
+                    'cached': True,
+                }
             else:
                 narrative_calls += 1
-            cv['narrative'] = {
-                'text': n.get('narrative') or '',
-                'model': n.get('model') or '',
-                'prompt_version': n.get('prompt_version') or '',
-                'source_hash': n.get('source_hash') or '',
-                'cached': bool(n.get('cached')),
-            }
+                cv['narrative'] = {
+                    'text': n.get('narrative') or '',
+                    'model': n.get('model') or '',
+                    'prompt_version': n.get('prompt_version') or '',
+                    'source_hash': n.get('source_hash') or '',
+                    'cached': False,
+                }
+        elif existing_narrative and existing_narrative.get('text'):
+            # Grok module not available at all (e.g. import failed). Still
+            # carry forward whatever previous run produced.
+            cv['narrative'] = existing_narrative
         write_json(cv_dir / f'{slug}.json', cv)
         md = render_markdown(cv)
         (cv_dir / f'{slug}.md').write_text(md, encoding='utf-8')

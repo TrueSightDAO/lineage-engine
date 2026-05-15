@@ -108,6 +108,30 @@ def get_contributor_contributions(all_data, contributor_name):
     return filtered
 
 
+def _to_float(value):
+    """Best-effort numeric coercion for ledger cells.
+
+    Returns 0.0 for empty / unparseable / NaN values. Strips comma-thousand
+    separators (operators sometimes enter "5,000.00" by hand). NaN is treated
+    as 0 specifically because at least one ledger row (row 2582 as of
+    2026-05-14) has the literal string "NaN" — a stale-data artifact that
+    must not silently propagate into JSON via Python's allow_nan default
+    (browsers reject NaN tokens as invalid JSON).
+    """
+    import math
+    if value in (None, '', 0, '0', '0.0'):
+        return 0.0
+    if isinstance(value, str):
+        value = value.strip().replace(',', '')
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if math.isnan(f) or math.isinf(f):
+        return 0.0
+    return f
+
+
 def analyze_contributions(contributions):
     """Analyze and categorize contributions."""
     if not contributions:
@@ -125,16 +149,9 @@ def analyze_contributions(contributions):
     }
 
     for c in contributions:
-        tdg_prov = 0
-        try:
-            tdg_prov = float(c.get('TDGs Provisioned', 0) or 0)
-            analysis['total_tdg_provisioned'] += tdg_prov
-        except (TypeError, ValueError):
-            pass
-        try:
-            analysis['total_tdg_issued'] += float(c.get('TDGs Issued', 0) or 0)
-        except (TypeError, ValueError):
-            pass
+        tdg_prov = _to_float(c.get('TDGs Provisioned'))
+        analysis['total_tdg_provisioned'] += tdg_prov
+        analysis['total_tdg_issued'] += _to_float(c.get('TDGs Issued'))
 
         project = (c.get('Project Name') or '').strip()
         if project:

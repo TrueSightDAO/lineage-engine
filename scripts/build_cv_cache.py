@@ -52,6 +52,12 @@ try:
 except Exception:
     HAS_WEASYPRINT = False
 
+try:
+    from grok_narrative import generate_narrative as _grok_generate_narrative  # type: ignore
+    HAS_GROK = True
+except Exception:
+    HAS_GROK = False
+
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -128,6 +134,11 @@ def collect_practitioners(data_root: Path) -> dict[str, dict[str, Any]]:
             rec['programs'][program] = {
                 'display_name': manifest.get('display_name', program),
                 'lineage_root': manifest.get('lineage_root'),
+                # source_pages[0] (manifest field) is the canonical "practice
+                # platform URL" — the deployed app where sessions happen.
+                # We surface it on the CV section so visitors can navigate
+                # back to the practice surface.
+                'source_pages': manifest.get('source_pages') or [],
                 'practice_events': events,
                 'practice_count': len(events),
                 'total_practice_minutes': sum(
@@ -242,6 +253,7 @@ def build_unified_cv(slug: str, pk_record: dict[str, Any] | None, preserved: dic
             name: {
                 'display_name': p['display_name'],
                 'lineage_root': p['lineage_root'],
+                'source_pages': p.get('source_pages') or [],
                 'practice_count': p['practice_count'],
                 'total_practice_minutes': p['total_practice_minutes'],
                 'recent_events': sorted(
@@ -409,7 +421,7 @@ def render_pdf(html: str, out_path: Path) -> bool:
 # main pipeline
 # ---------------------------------------------------------------------------
 
-def build(data_root: Path, write_pdfs: bool = True) -> dict[str, Any]:
+def build(data_root: Path, write_pdfs: bool = True, write_narratives: bool = True) -> dict[str, Any]:
     practitioners = collect_practitioners(data_root)
     preserved = collect_preserved_cvs(data_root)
     aliases_path = data_root / '_cache' / 'aliases.json'
@@ -434,8 +446,30 @@ def build(data_root: Path, write_pdfs: bool = True) -> dict[str, Any]:
     # Write outputs
     cv_dir = data_root / '_cache' / 'cv'
     cv_dir.mkdir(parents=True, exist_ok=True)
+    grok_cache_dir = data_root / '_cache' / 'grok'
     members = []
+    narrative_hits = 0
+    narrative_calls = 0
+    narrative_errors = 0
     for slug, cv in sorted(cvs_by_slug.items()):
+        # Generate or recover cached narrative BEFORE writing the JSON so
+        # the narrative is part of the unified CV. Skipped silently if
+        # HAS_GROK is False or write_narratives=False (e.g. local dry-run).
+        if HAS_GROK and write_narratives:
+            n = _grok_generate_narrative(cv, grok_cache_dir)
+            if n.get('error'):
+                narrative_errors += 1
+            elif n.get('cached'):
+                narrative_hits += 1
+            else:
+                narrative_calls += 1
+            cv['narrative'] = {
+                'text': n.get('narrative') or '',
+                'model': n.get('model') or '',
+                'prompt_version': n.get('prompt_version') or '',
+                'source_hash': n.get('source_hash') or '',
+                'cached': bool(n.get('cached')),
+            }
         write_json(cv_dir / f'{slug}.json', cv)
         md = render_markdown(cv)
         (cv_dir / f'{slug}.md').write_text(md, encoding='utf-8')

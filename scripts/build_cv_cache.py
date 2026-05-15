@@ -79,8 +79,17 @@ def read_json(path: Path) -> Any:
 
 
 def write_json(path: Path, obj: Any) -> None:
+    """Strict JSON write — fails loudly on NaN / Infinity so the browser
+    never gets handed a `JSON.parse`-rejected token. Browsers reject literal
+    `NaN`, but Python's json.dumps emits it by default. allow_nan=False makes
+    bad numeric data surface as a build-time error instead of a runtime
+    'Network error: Unexpected token N' on the CV page.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(obj, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+    path.write_text(
+        json.dumps(obj, indent=2, ensure_ascii=False, allow_nan=False) + '\n',
+        encoding='utf-8',
+    )
 
 
 # ---------------------------------------------------------------------------

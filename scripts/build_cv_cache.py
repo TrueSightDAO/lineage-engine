@@ -158,6 +158,19 @@ def derive_slug(pk_hash: str, identity: dict[str, Any], aliases: dict[str, str])
 # preserved migrated CVs (Fatima, Emelin) → seed index
 # ---------------------------------------------------------------------------
 
+def _coerce_voting_pct(raw: Any) -> float:
+    """Convert a voting-weight cell ("0.20%" or 0.002) to a float 0-100."""
+    if raw in (None, ''):
+        return 0.0
+    if isinstance(raw, (int, float)):
+        return float(raw) * 100 if raw <= 1 else float(raw)
+    s = str(raw).strip().rstrip('%').replace(',', '')
+    try:
+        return float(s)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def collect_preserved_cvs(data_root: Path) -> dict[str, dict[str, Any]]:
     """Pre-existing _cache/cv/<slug>.json entries that aren't tied to a pk-hash yet.
 
@@ -191,10 +204,12 @@ def collect_preserved_cvs(data_root: Path) -> dict[str, dict[str, Any]]:
         else:
             source = data
         summary = (source.get('summary') or {}) if isinstance(source, dict) else {}
+        governance = (source.get('governance') or {}) if isinstance(source, dict) else {}
         out[slug] = {
             'slug': slug,
             'display_name': (source.get('contributor_name') if isinstance(source, dict) else None) or slug,
             'source': source,
+            'governance': governance,
             'total_contributions': summary.get('total_contributions', 0),
             'total_tdg_provisioned': summary.get('total_tdg_provisioned', 0),
             'date_range': summary.get('date_range', {}),
@@ -248,6 +263,7 @@ def build_unified_cv(slug: str, pk_record: dict[str, Any] | None, preserved: dic
             'date_range': preserved.get('date_range'),
             'source': preserved.get('source'),
         }
+        cv['governance'] = preserved.get('governance') or {}
     cv['_generator'] = 'build_cv_cache'
     return cv
 
@@ -434,12 +450,13 @@ def build(data_root: Path, write_pdfs: bool = True) -> dict[str, Any]:
         dc = cv.get('dao_contributions') or {}
         dc_src = (dc.get('source') or {}) if isinstance(dc, dict) else {}
         dc_summary = (dc_src.get('summary') or {}) if isinstance(dc_src, dict) else {}
+        gov = cv.get('governance') or {}
         members.append({
             'slug': slug,
             'display_name': cv['display_name'],
             'pk_hash': cv.get('pk_hash'),
-            'is_governor': False,                  # populated by a later builder PR
-            'voting_rights': 0,                    # populated by a later builder PR
+            'is_governor': bool(gov.get('is_governor')),
+            'voting_rights': _coerce_voting_pct(gov.get('total_voting_power_pct') or gov.get('voting_power_pct')),
             'primary_program': next(iter(cv.get('programs') or {}), None),
             'has_dao_contributions': cv.get('has_dao_contributions', False),
             'has_elective_records': cv.get('has_elective_records', False),

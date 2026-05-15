@@ -62,6 +62,64 @@ def setup_google_sheets():
         return None
 
 
+def fetch_governors(service):
+    """Return the current top-10 governor names from the 'Governors' tab.
+
+    The Governors tab holds the active 180-day governance period only —
+    rows 11..20 are the current governors (Gary Teh, Jacob Nelan, ...).
+    No historical snapshot is kept on the sheet itself; for per-season
+    history a separate snapshot system would need to write into a
+    dedicated `programs/_governance/seasons/` directory each cycle.
+    """
+    try:
+        res = service.spreadsheets().values().get(
+            spreadsheetId=SPREADSHEET_ID,
+            range="'Governors'!A11:B25",
+        ).execute()
+        names = []
+        for row in res.get('values', []):
+            name = (row[0] if row else '').strip()
+            if name and name.lower() != 'governor':
+                names.append(name)
+        return names
+    except Exception as e:  # noqa: BLE001
+        print(f'⚠ Could not fetch Governors tab: {e}', file=sys.stderr)
+        return []
+
+
+def fetch_voting_weights(service):
+    """Return {contributor_name: {voting_power, tdg_controlled, ownership_rank}}
+    from the 'Contributors voting weight' tab.
+    """
+    try:
+        res = service.spreadsheets().values().get(
+            spreadsheetId=SPREADSHEET_ID,
+            range="'Contributors voting weight'!A4:K2000",
+        ).execute()
+        rows = res.get('values', [])
+        if not rows:
+            return {}
+        headers = rows[0]
+        idx = {h: i for i, h in enumerate(headers)}
+        out = {}
+        for row in rows[1:]:
+            if len(row) < 3:
+                continue
+            name = row[idx['Contributors']].strip() if 'Contributors' in idx and idx['Contributors'] < len(row) else ''
+            if not name:
+                continue
+            out[name] = {
+                'ownership_rank': row[idx.get('Ownership Rank - Controlled', 0)] if idx.get('Ownership Rank - Controlled', -1) < len(row) else '',
+                'voting_power_pct': row[idx.get('Quadratic Voting Power', 4)] if idx.get('Quadratic Voting Power', -1) >= 0 and idx['Quadratic Voting Power'] < len(row) else '',
+                'tdg_controlled': row[idx.get('Total TDG controlled', 8)] if idx.get('Total TDG controlled', -1) >= 0 and idx['Total TDG controlled'] < len(row) else '',
+                'total_voting_power_pct': row[idx.get('Total Voting Power', 10)] if idx.get('Total Voting Power', -1) >= 0 and idx['Total Voting Power'] < len(row) else '',
+            }
+        return out
+    except Exception as e:  # noqa: BLE001
+        print(f'⚠ Could not fetch Contributors voting weight tab: {e}', file=sys.stderr)
+        return {}
+
+
 def fetch_all_contributions(service):
     """Fetch all contributions from the Ledger history sheet."""
     try:

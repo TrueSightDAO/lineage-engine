@@ -91,10 +91,17 @@ def claim_slug(name: str, taken: set[str]) -> str:
     raise RuntimeError(f'could not allocate slug for {name!r}')
 
 
-def write_dao_cv_json(data_root: Path, slug: str, contributor_name: str, contributions: list, analysis: dict) -> Path:
+def write_dao_cv_json(data_root: Path, slug: str, contributor_name: str, contributions: list, analysis: dict, governance: dict | None = None) -> Path:
     """Write the per-contributor payload that build_cv_cache treats as a
     preserved testimonial. Matches save_contribution_data() in
-    fetch_contributions.py exactly so the builder picks it up unchanged."""
+    fetch_contributions.py exactly so the builder picks it up unchanged.
+
+    governance: optional {is_governor, voting_power_pct, tdg_controlled,
+    ownership_rank, total_voting_power_pct} from the Main Ledger
+    'Governors' + 'Contributors voting weight' tabs. Stored alongside
+    summary/analysis so build_cv_cache can lift the fields up to
+    members/index.json without re-fetching.
+    """
     payload = {
         'contributor_name': contributor_name,
         'generated_date': datetime.now().isoformat(),
@@ -105,6 +112,7 @@ def write_dao_cv_json(data_root: Path, slug: str, contributor_name: str, contrib
             'projects': analysis['projects'],
             'date_range': analysis['date_range'],
         },
+        'governance': governance or {},
         'analysis': analysis,
         'raw_contributions': contributions,
     }
@@ -136,6 +144,12 @@ def main() -> None:
     if not all_data:
         sys.exit(1)
 
+    print('🏛  Fetching governors + voting weights…')
+    governor_set = {n.lower() for n in fc.fetch_governors(service)}
+    voting_map = fc.fetch_voting_weights(service)
+    voting_map_lower = {k.lower(): v for k, v in voting_map.items()}
+    print(f'  ▶ {len(governor_set)} governors; {len(voting_map)} voting-weight rows.')
+
     names = collect_unique_names(all_data)
     print(f'🧑‍🤝‍🧑 {len(names)} unique contributor names on the ledger.')
 
@@ -159,9 +173,16 @@ def main() -> None:
             continue
         analysis = fc.analyze_contributions(contributions)
         slug = existing.get(name.lower()) or claim_slug(name, taken)
-        out = write_dao_cv_json(data_root, slug, name, contributions, analysis)
+        governance = {
+            'is_governor': name.lower() in governor_set,
+        }
+        vw = voting_map_lower.get(name.lower())
+        if vw:
+            governance.update(vw)
+        out = write_dao_cv_json(data_root, slug, name, contributions, analysis, governance=governance)
         rel = out.relative_to(data_root)
-        print(f'  ✓ {name:40s} → {rel}')
+        marker = '🏛 ' if governance['is_governor'] else '  '
+        print(f'  ✓{marker}{name:40s} → {rel}')
         written += 1
 
     print('')

@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# Credentials — never commit
+*-credentials.json
+service-account*.json
+.env
+
+# Local outputs
+testimonials/
+/tmp/
+*.log

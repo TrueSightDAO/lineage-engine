@@ -425,6 +425,15 @@ def build(data_root: Path, write_pdfs: bool = True) -> dict[str, Any]:
         (cv_dir / f'{slug}.md').write_text(md, encoding='utf-8')
         if write_pdfs:
             render_pdf(render_html(cv, md), cv_dir / f'{slug}.pdf')
+        # Pull the headline DAO numbers up to the index so the directory
+        # page can show "X TDG · Y contributions" per card without having
+        # to fetch every per-slug JSON. TDG Issued (col G) is what the
+        # contributor actually controls; col E "Provisioned" reads as
+        # approve-but-not-yet-awarded and is misleading on the public
+        # directory.
+        dc = cv.get('dao_contributions') or {}
+        dc_src = (dc.get('source') or {}) if isinstance(dc, dict) else {}
+        dc_summary = (dc_src.get('summary') or {}) if isinstance(dc_src, dict) else {}
         members.append({
             'slug': slug,
             'display_name': cv['display_name'],
@@ -434,6 +443,8 @@ def build(data_root: Path, write_pdfs: bool = True) -> dict[str, Any]:
             'primary_program': next(iter(cv.get('programs') or {}), None),
             'has_dao_contributions': cv.get('has_dao_contributions', False),
             'has_elective_records': cv.get('has_elective_records', False),
+            'total_tdg_controlled': dc_summary.get('total_tdg_issued') or 0,
+            'total_contributions': dc_summary.get('total_contributions') or 0,
             'last_updated': cv['generated_at'],
         })
 

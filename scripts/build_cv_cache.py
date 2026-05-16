@@ -68,6 +68,43 @@ except Exception:
 # Credential profile URL pattern — what the per-slug QR code resolves to.
 CREDENTIAL_PROFILE_URL = 'https://truesight.me/credentials/#{slug}'
 
+# Per-program credential URL — surface where partner-co-branded QR codes resolve.
+# Spec: agentic_ai_context/CREDENTIALING_PROGRAM_PAGES.md §15.
+PROGRAM_CREDENTIAL_URL = 'https://truesight.me/programs/{program}/credentials/#{slug}'
+
+# Directory where per-program logo PNGs are vendored. One subdirectory per
+# program slug; each holds a square-ish `logo.png` that gets composited into
+# the centre of the program-scoped QR. A program without a vendored logo is
+# skipped silently (warn-and-continue) so partner onboarding isn't blocked
+# on the logo being committed first.
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROGRAM_ASSETS_DIR = SCRIPT_DIR / 'program_assets'
+PROGRAM_ASSETS_REGISTRY = PROGRAM_ASSETS_DIR / 'registry.json'
+
+
+def _load_program_url_map() -> dict[str, str]:
+    """Map data-side `cv.programs[]` key → URL-side `<program-slug>`.
+
+    Source of truth: `program_assets/registry.json`. The two slug spaces
+    can diverge (legacy data-side `capoeira-tribo-mirim` vs URL-side
+    `tribomirim`) so the registry holds an explicit mapping rather than
+    relying on equality. Missing entries fall back to identity so newly-
+    onboarded partners that use the same slug on both sides work without
+    extra registry plumbing.
+    """
+    if not PROGRAM_ASSETS_REGISTRY.is_file():
+        return {}
+    try:
+        reg = json.loads(PROGRAM_ASSETS_REGISTRY.read_text(encoding='utf-8'))
+    except Exception as e:
+        print(f'  ⚠ program_assets/registry.json parse error: {e}', file=sys.stderr)
+        return {}
+    out: dict[str, str] = {}
+    for url_slug, cfg in (reg.get('programs') or {}).items():
+        for data_slug in (cfg or {}).get('data_program_slugs') or []:
+            out[data_slug] = url_slug
+    return out
+
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -454,13 +491,21 @@ def render_html(cv: dict[str, Any], md_body: str, qr_path: Path | None = None) -
 <body>{qr_block}{''.join(html_body)}</body></html>"""
 
 
-def render_qr(slug: str, target_url: str, out_path: Path) -> bool:
-    """Write _cache/cv/<slug>.qr.png with the TrueSight-logo QR code."""
+def render_qr(slug: str, target_url: str, out_path: Path, logo_path: Path | None = None) -> bool:
+    """Write a QR PNG that resolves to ``target_url`` with a centred logo.
+
+    When ``logo_path`` is omitted, the default TrueSight icon is used (canonical
+    credentials surface). For per-program QRs, pass the vendored partner logo
+    at ``program_assets/<program-slug>/logo.png``.
+    """
     if not HAS_QR:
         print(f'  ⚠ skipping QR (qrcode/Pillow not installed): {out_path}', file=sys.stderr)
         return False
     try:
-        _generate_qr_with_logo(target_url, out_path)
+        if logo_path is not None:
+            _generate_qr_with_logo(target_url, out_path, logo_path=logo_path)
+        else:
+            _generate_qr_with_logo(target_url, out_path)
         return True
     except Exception as e:
         print(f'  ⚠ QR render failed for {out_path}: {e}', file=sys.stderr)
@@ -510,6 +555,8 @@ def build(data_root: Path, write_pdfs: bool = True, write_narratives: bool = Tru
     cv_dir = data_root / '_cache' / 'cv'
     cv_dir.mkdir(parents=True, exist_ok=True)
     grok_cache_dir = data_root / '_cache' / 'grok'
+    # Phase 3a — preload the data-slug → URL-slug map once per build.
+    program_url_map = _load_program_url_map()
     members = []
     narrative_hits = 0
     narrative_calls = 0
@@ -561,6 +608,29 @@ def build(data_root: Path, write_pdfs: bool = True, write_narratives: bool = Tru
         (cv_dir / f'{slug}.md').write_text(md, encoding='utf-8')
         if write_pdfs:
             render_pdf(render_html(cv, md, qr_path), cv_dir / f'{slug}.pdf')
+
+        # Phase 3a — per-program QR + PDF artifacts. For each program this
+        # CV participates in, resolve the URL-side slug via the registry
+        # at `program_assets/registry.json`, then emit a sibling
+        # `<slug>__<url-slug>.qr.png` whose centre carries the partner
+        # logo (vendored at `program_assets/<url-slug>/logo.png`) and
+        # whose payload is the production URL of the program-scoped
+        # credential surface. The matching `<slug>__<url-slug>.pdf`
+        # embeds that QR.
+        #
+        # A program without a vendored logo is silently skipped — partner
+        # onboarding shouldn't block on the logo being committed first.
+        # Spec: agentic_ai_context/CREDENTIALING_PROGRAM_PAGES.md §15.
+        for data_program_slug in sorted((cv.get('programs') or {}).keys()):
+            url_program_slug = program_url_map.get(data_program_slug, data_program_slug)
+            logo_path = PROGRAM_ASSETS_DIR / url_program_slug / 'logo.png'
+            if not logo_path.is_file():
+                continue
+            program_url = PROGRAM_CREDENTIAL_URL.format(program=url_program_slug, slug=slug)
+            program_qr_path = cv_dir / f'{slug}__{url_program_slug}.qr.png'
+            ok = render_qr(slug, program_url, program_qr_path, logo_path=logo_path)
+            if ok and write_pdfs:
+                render_pdf(render_html(cv, md, program_qr_path), cv_dir / f'{slug}__{url_program_slug}.pdf')
         # Pull the headline DAO numbers up to the index so the directory
         # page can show "X TDG · Y contributions" per card without having
         # to fetch every per-slug JSON. TDG Issued (col G) is what the

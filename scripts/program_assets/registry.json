@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "comment": "Maps data-side program slugs (the keys under cv.programs[]) to URL-side program slugs (the directory under truesight_me/programs/). When they match, an entry is still required so build_cv_cache.py knows the program is registered. Add a new entry whenever a partner is onboarded — same step as vendoring the logo. Spec: agentic_ai_context/CREDENTIALING_PROGRAM_PAGES.md §15.",
+  "programs": {
+    "tribomirim": {
+      "data_program_slugs": ["capoeira-tribo-mirim"]
+    },
+    "butterfly-effect": {
+      "data_program_slugs": ["butterfly-effect"]
+    }
+  }
+}

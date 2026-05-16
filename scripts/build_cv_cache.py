@@ -58,6 +58,16 @@ try:
 except Exception:
     HAS_GROK = False
 
+try:
+    from qr_code import generate_qr_with_logo as _generate_qr_with_logo  # type: ignore
+    HAS_QR = True
+except Exception:
+    HAS_QR = False
+
+
+# Credential profile URL pattern — what the per-slug QR code resolves to.
+CREDENTIAL_PROFILE_URL = 'https://truesight.me/credentials/#{slug}'
+
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -276,6 +286,10 @@ def build_unified_cv(slug: str, pk_record: dict[str, Any] | None, preserved: dic
             'source': preserved.get('source'),
         }
         cv['governance'] = preserved.get('governance') or {}
+    cv['qr_code'] = {
+        'path': f'_cache/cv/{slug}.qr.png',
+        'target_url': CREDENTIAL_PROFILE_URL.format(slug=slug),
+    }
     cv['_generator'] = 'build_cv_cache'
     return cv
 
@@ -348,11 +362,13 @@ def render_markdown(cv: dict[str, Any]) -> str:
     return '\n'.join(lines) + '\n'
 
 
-def render_html(cv: dict[str, Any], md_body: str) -> str:
+def render_html(cv: dict[str, Any], md_body: str, qr_path: Path | None = None) -> str:
     """Minimal HTML wrap of the Markdown body for WeasyPrint.
 
     Inline a small stylesheet that targets 'respectable job-application CV'
-    typography per the CREDENTIALING_PLATFORM.md decision.
+    typography per the CREDENTIALING_PLATFORM.md decision. When qr_path is
+    provided and exists, the PDF gets a business-card-style QR in the top-right
+    of page 1 that points back to the credential profile URL.
     """
     # Markdown → very-light HTML conversion (paragraphs + headings + lists).
     # Keeping this dep-free for now; can swap to python-markdown later.
@@ -418,10 +434,37 @@ def render_html(cv: dict[str, Any], md_body: str) -> str:
       a { color: #245785; text-decoration: none; }
       hr { border: none; border-top: 1px solid #e0e0e0; margin: 18pt 0; }
       p { margin: 4pt 0; }
+      .cv-qr { float: right; width: 28mm; margin: 0 0 4mm 6mm; }
+      .cv-qr img { display: block; width: 28mm; height: 28mm; }
+      .cv-qr-caption { font-family: 'Source Sans Pro', 'Helvetica Neue', Arial, sans-serif; font-size: 6.5pt; color: #888; text-align: center; margin-top: 1mm; letter-spacing: 0.04em; }
     """
+
+    qr_block = ''
+    if qr_path and Path(qr_path).is_file():
+        qr_uri = Path(qr_path).resolve().as_uri()
+        qr_block = (
+            f"<div class='cv-qr'>"
+            f"<img src='{qr_uri}' alt='Scan to view profile'/>"
+            f"<div class='cv-qr-caption'>scan to view profile</div>"
+            f"</div>"
+        )
+
     return f"""<!DOCTYPE html>
 <html><head><meta charset='utf-8'><style>{css}</style></head>
-<body>{''.join(html_body)}</body></html>"""
+<body>{qr_block}{''.join(html_body)}</body></html>"""
+
+
+def render_qr(slug: str, target_url: str, out_path: Path) -> bool:
+    """Write _cache/cv/<slug>.qr.png with the TrueSight-logo QR code."""
+    if not HAS_QR:
+        print(f'  ⚠ skipping QR (qrcode/Pillow not installed): {out_path}', file=sys.stderr)
+        return False
+    try:
+        _generate_qr_with_logo(target_url, out_path)
+        return True
+    except Exception as e:
+        print(f'  ⚠ QR render failed for {out_path}: {e}', file=sys.stderr)
+        return False
 
 
 def render_pdf(html: str, out_path: Path) -> bool:
@@ -510,11 +553,14 @@ def build(data_root: Path, write_pdfs: bool = True, write_narratives: bool = Tru
             # Grok module not available at all (e.g. import failed). Still
             # carry forward whatever previous run produced.
             cv['narrative'] = existing_narrative
+        qr_target = (cv.get('qr_code') or {}).get('target_url') or CREDENTIAL_PROFILE_URL.format(slug=slug)
+        qr_path = cv_dir / f'{slug}.qr.png'
+        render_qr(slug, qr_target, qr_path)
         write_json(cv_dir / f'{slug}.json', cv)
         md = render_markdown(cv)
         (cv_dir / f'{slug}.md').write_text(md, encoding='utf-8')
         if write_pdfs:
-            render_pdf(render_html(cv, md), cv_dir / f'{slug}.pdf')
+            render_pdf(render_html(cv, md, qr_path), cv_dir / f'{slug}.pdf')
         # Pull the headline DAO numbers up to the index so the directory
         # page can show "X TDG · Y contributions" per card without having
         # to fetch every per-slug JSON. TDG Issued (col G) is what the

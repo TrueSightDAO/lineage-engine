@@ -64,6 +64,12 @@ try:
 except Exception:
     HAS_QR = False
 
+try:
+    from cert_overlay import render_certificate_pdf_overlay as _render_cert_overlay  # type: ignore
+    HAS_CERT_OVERLAY = True
+except Exception:
+    HAS_CERT_OVERLAY = False
+
 
 # Credential profile URL pattern — what the per-slug QR code resolves to.
 CREDENTIAL_PROFILE_URL = 'https://truesight.me/credentials/#{slug}'
@@ -80,6 +86,105 @@ PROGRAM_CREDENTIAL_URL = 'https://truesight.me/programs/{program}/credentials/#{
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROGRAM_ASSETS_DIR = SCRIPT_DIR / 'program_assets'
 PROGRAM_ASSETS_REGISTRY = PROGRAM_ASSETS_DIR / 'registry.json'
+
+
+def _load_cert_config(url_program_slug: str) -> dict[str, Any] | None:
+    """Load `program_assets/<slug>/cert_config.json` if present.
+
+    Phase 3b.1: cert config (strategy + overlay coordinates) lives in
+    lineage-engine alongside the template + font. Phase 3b.2 will lift
+    the canonical source up to truesight_me/programs/<slug>/manifest.json
+    per spec §17.13.5. For now this is the engine-local home.
+    """
+    path = PROGRAM_ASSETS_DIR / url_program_slug / 'cert_config.json'
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding='utf-8'))
+    except Exception as e:
+        print(f'  ⚠ cert_config parse error for {url_program_slug}: {e}', file=sys.stderr)
+        return None
+
+
+def _resolve_issued_at(cv: dict[str, Any], data_program_slug: str) -> datetime:
+    """Pick the timestamp the certificate prints as the issuance date.
+
+    Heuristic for Phase 3b.1 (before Phase 3b.6 `locked_at` lands):
+      - Use the LATEST `recent_events[*].captured_at` for this program if any
+      - Fall back to today's date (UTC) if no events recorded
+    Once `locked_at` ships, that overrides everything else — but we don't
+    consume it yet.
+    """
+    program_rec = (cv.get('programs') or {}).get(data_program_slug) or {}
+    locked_at = program_rec.get('locked_at')
+    if locked_at:
+        try:
+            return datetime.fromisoformat(str(locked_at).replace('Z', '+00:00'))
+        except Exception:
+            pass
+    events = program_rec.get('recent_events') or []
+    latest = None
+    for ev in events:
+        ts = ev.get('captured_at')
+        if not ts:
+            continue
+        try:
+            dt = datetime.fromisoformat(str(ts).replace('Z', '+00:00'))
+            if latest is None or dt > latest:
+                latest = dt
+        except Exception:
+            continue
+    return latest or datetime.now(timezone.utc)
+
+
+def _render_program_certificate(
+    *,
+    url_program_slug: str,
+    data_program_slug: str,
+    cv: dict[str, Any],
+    slug: str,
+    qr_path: Path,
+    out_path: Path,
+) -> bool:
+    """Phase 3b certificate render. Dispatches on cert_config.strategy.
+    Returns True on success, False on warn-and-skip."""
+    cfg = _load_cert_config(url_program_slug)
+    if not cfg:
+        return False  # no cert config — partner not yet on Phase 3b
+    strategy = cfg.get('strategy', 'html_template')
+    if strategy == 'pdf_overlay':
+        if not HAS_CERT_OVERLAY:
+            print(f'  ⚠ cert_overlay module not importable; skipping {out_path.name}', file=sys.stderr)
+            return False
+        template_rel = cfg.get('pdf_template')
+        if not template_rel:
+            print(f'  ⚠ cert_config missing pdf_template for {url_program_slug}', file=sys.stderr)
+            return False
+        template_pdf = PROGRAM_ASSETS_DIR / url_program_slug / template_rel
+        if not template_pdf.is_file():
+            print(f'  ⚠ template missing: {template_pdf}', file=sys.stderr)
+            return False
+        font_paths = [
+            PROGRAM_ASSETS_DIR / url_program_slug / fp
+            for fp in cfg.get('font_files') or []
+        ]
+        try:
+            _render_cert_overlay(
+                template_pdf=template_pdf,
+                out_path=out_path,
+                fields=cfg.get('overlay_fields') or {},
+                recipient_name=cv.get('display_name') or slug,
+                issued_at=_resolve_issued_at(cv, data_program_slug),
+                qr_path=qr_path,
+                font_files=font_paths,
+            )
+            return True
+        except Exception as e:
+            print(f'  ⚠ pdf_overlay render failed for {out_path}: {e}', file=sys.stderr)
+            return False
+    # 'html_template' strategy: stub branch (spec §17.13 — deferred to a future
+    # partner without their own PDF). Silent no-op until implemented.
+    return False
 
 
 def _load_program_url_map() -> dict[str, str]:
@@ -631,6 +736,21 @@ def build(data_root: Path, write_pdfs: bool = True, write_narratives: bool = Tru
             ok = render_qr(slug, program_url, program_qr_path, logo_path=logo_path)
             if ok and write_pdfs:
                 render_pdf(render_html(cv, md, program_qr_path), cv_dir / f'{slug}__{url_program_slug}.pdf')
+            # Phase 3b — partner-branded certificate PDF, dispatched on
+            # cert_config.strategy. Emits `<slug>__<url-program-slug>__cert.pdf`
+            # only when the partner has Phase 3b configured (cert_config.json
+            # present in program_assets). Independent of write_pdfs since
+            # the cert PDF doesn't depend on WeasyPrint — it merges a fresh
+            # reportlab canvas atop the vendored template via pypdf.
+            if ok:
+                _render_program_certificate(
+                    url_program_slug=url_program_slug,
+                    data_program_slug=data_program_slug,
+                    cv=cv,
+                    slug=slug,
+                    qr_path=program_qr_path,
+                    out_path=cv_dir / f'{slug}__{url_program_slug}__cert.pdf',
+                )
         # Pull the headline DAO numbers up to the index so the directory
         # page can show "X TDG · Y contributions" per card without having
         # to fetch every per-slug JSON. TDG Issued (col G) is what the

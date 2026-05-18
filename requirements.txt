@@ -4,3 +4,10 @@ google-auth-httplib2>=0.1
 google-auth-oauthlib>=0.5
 qrcode[pil]>=7.4
 
+# Phase 3b — partner-branded certificate PDFs (pdf_overlay strategy).
+# build_cv_cache.py imports cert_overlay which uses these to merge a
+# reportlab canvas (text + QR) atop the vendored partner template via
+# pypdf. WeasyPrint stays the engine for the canonical CV PDF.
+pypdf>=4.0
+reportlab>=4.0
+

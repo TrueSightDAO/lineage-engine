@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "strategy": "pdf_overlay",
+  "pdf_template": "cert_template.pdf",
+  "font_files": ["fonts/EBGaramond-Italic-VariableFont_wght.ttf"],
+  "overlay_fields": {
+    "recipient_name": {
+      "x_pt": 429,
+      "y_pt": 248,
+      "font": "EBGaramond-Italic",
+      "size_pt": 34,
+      "anchor": "center",
+      "color": "#1a2a5a",
+      "max_width_pt": 540
+    },
+    "date": {
+      "x_pt": 200,
+      "y_pt": 90,
+      "font": "EBGaramond-Italic",
+      "size_pt": 16,
+      "anchor": "center",
+      "color": "#1a2a5a",
+      "format": "%-d %B %Y"
+    },
+    "qr": {
+      "x_pt": 720,
+      "y_pt": 55,
+      "size_pt": 55
+    }
+  },
+  "_comment": "Phase 3b.1 (2026-05-18): cert config lives in lineage-engine alongside the template + font for now. Per spec §17.13.5 the long-term source of truth is truesight_me/programs/<slug>/manifest.json::certificate; we'll lift these fields up there in Phase 3b.2. Coordinates measured against the rasterized 859x612pt blank template. QR placement is operator-proposed bottom-right corner inside the ornamental border — iterate with Bilal if a different spot is preferred."
+}

@@ -70,6 +70,16 @@ try:
 except Exception:
     HAS_CERT_OVERLAY = False
 
+try:
+    from fetch_pending_chatlogs import (  # type: ignore
+        fetch_pending_chatlogs_by_contributor as _fetch_pending_chatlogs,
+        SCORED_CHATLOGS_FLOOR_DATE as _PENDING_FLOOR_DATE,
+    )
+    HAS_PENDING_FETCHER = True
+except Exception:
+    HAS_PENDING_FETCHER = False
+    _PENDING_FLOOR_DATE = '2024-12-13'
+
 
 # Credential profile URL pattern — what the per-slug QR code resolves to.
 CREDENTIAL_PROFILE_URL = 'https://truesight.me/credentials/#{slug}'
@@ -384,8 +394,21 @@ def collect_preserved_cvs(data_root: Path) -> dict[str, dict[str, Any]]:
 # CV rendering
 # ---------------------------------------------------------------------------
 
-def build_unified_cv(slug: str, pk_record: dict[str, Any] | None, preserved: dict[str, Any] | None) -> dict[str, Any]:
-    """Merge practitioner record (if any) with preserved testimonial (if any)."""
+def build_unified_cv(
+    slug: str,
+    pk_record: dict[str, Any] | None,
+    preserved: dict[str, Any] | None,
+    *,
+    pending_by_name: dict[str, list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
+    """Merge practitioner record (if any) with preserved testimonial (if any).
+
+    `pending_by_name` is a Phase 4.1 hook (§18) — when supplied, look up
+    pending Scored Chatlogs entries by this CV's display_name and attach
+    them under cv['pending_contributions']. The HTML credential page
+    renders this as a separate "Recent activity (pending review)"
+    section with caveat banner; the markdown→PDF path ignores it.
+    """
     identity = (pk_record or {}).get('identity') or {}
     names = identity.get('names') or []
     display_name = (
@@ -432,6 +455,20 @@ def build_unified_cv(slug: str, pk_record: dict[str, Any] | None, preserved: dic
         'path': f'_cache/cv/{slug}.qr.png',
         'target_url': CREDENTIAL_PROFILE_URL.format(slug=slug),
     }
+
+    # Phase 4.1 — attach pending Scored Chatlogs entries indexed by
+    # display_name. Empty list (vs missing) means "looked up, none
+    # found" — page renderer can use that signal to suppress the
+    # section entirely. Dedup is owned by the operator's promotion
+    # GAS via Scored Chatlogs col L (already filtered in fetcher).
+    if pending_by_name is not None:
+        cv['pending_contributions'] = {
+            'source_tab': 'Scored Chatlogs',
+            'source_url': 'https://docs.google.com/spreadsheets/d/1Tbj7H5ur_egQLRugdXUaSIhEYIKp0vvVv2IZ7WTLCUo/edit',
+            'floor_date': _PENDING_FLOOR_DATE,
+            'entries': pending_by_name.get(display_name, []),
+        }
+
     cv['_generator'] = 'build_cv_cache'
     return cv
 
@@ -640,6 +677,26 @@ def build(data_root: Path, write_pdfs: bool = True, write_narratives: bool = Tru
     aliases_path = data_root / '_cache' / 'aliases.json'
     aliases: dict[str, str] = read_json(aliases_path) or {} if aliases_path.is_file() else {}
 
+    # Phase 4.1 — fetch pending (submitted-but-unreviewed) Scored Chatlogs
+    # entries once for the whole build, indexed by Contributor Name. Each
+    # build_unified_cv call attaches the slice belonging to that CV's
+    # display_name. Quietly degrades to an empty map if sheets API isn't
+    # reachable (no credentials in the CI environment, transient failure,
+    # etc.) — pending list is best-effort; canonical Ledger history record
+    # is unaffected.
+    # Spec: agentic_ai_context/CREDENTIALING_PROGRAM_PAGES.md §18.
+    pending_by_name: dict[str, list[dict[str, Any]]] = {}
+    if HAS_PENDING_FETCHER:
+        try:
+            from fetch_contributions import setup_google_sheets as _setup_sheets  # type: ignore
+            sheets_service = _setup_sheets()
+            if sheets_service is not None:
+                pending_by_name = _fetch_pending_chatlogs(sheets_service)
+        except Exception as e:
+            print(f'  ⚠ pending chatlogs fetch failed (continuing): {e}', file=sys.stderr)
+    else:
+        print('  ⚠ pending chatlogs fetcher not importable — pending sections will be empty', file=sys.stderr)
+
     # First pass — assign canonical slugs for each pk-hash record.
     for pk_hash, rec in practitioners.items():
         aliases[pk_hash] = derive_slug(pk_hash, rec.get('identity') or {}, aliases)
@@ -649,12 +706,12 @@ def build(data_root: Path, write_pdfs: bool = True, write_narratives: bool = Tru
     # Practitioners
     for pk_hash, rec in practitioners.items():
         slug = aliases[pk_hash]
-        cvs_by_slug[slug] = build_unified_cv(slug, rec, preserved.get(slug))
+        cvs_by_slug[slug] = build_unified_cv(slug, rec, preserved.get(slug), pending_by_name=pending_by_name)
     # DAO-only preserved testimonials (no matching pk-hash)
     for slug, p in preserved.items():
         if slug in cvs_by_slug:
             continue
-        cvs_by_slug[slug] = build_unified_cv(slug, None, p)
+        cvs_by_slug[slug] = build_unified_cv(slug, None, p, pending_by_name=pending_by_name)
 
     # Write outputs
     cv_dir = data_root / '_cache' / 'cv'

@@ -761,13 +761,36 @@ def build(data_root: Path, write_pdfs: bool = True, write_narratives: bool = Tru
         dc_src = (dc.get('source') or {}) if isinstance(dc, dict) else {}
         dc_summary = (dc_src.get('summary') or {}) if isinstance(dc_src, dict) else {}
         gov = cv.get('governance') or {}
+        # Multi-program members fix (2026-05-18): exposing the full list
+        # of programs the member participates in, not just an arbitrary
+        # "primary_program" alphabetical winner. The cohort filter on
+        # truesight_me's program-shell.js now matches on `programs`
+        # membership instead of `primary_program` equality, so a person
+        # in N programs shows up in N cohort listings as expected. The
+        # `primary_program` field is preserved for backwards-compat with
+        # older readers, but now resolves to "the program with the most
+        # logged practice activity" (instead of alphabetical-first) so
+        # the historically meaningful primary doesn't flip every time a
+        # member joins a new program with an alphabetically-earlier slug.
+        programs_dict = cv.get('programs') or {}
+        program_slugs = list(programs_dict.keys())
+        def _program_activity_score(name: str) -> tuple[int, int]:
+            rec = programs_dict.get(name) or {}
+            return (
+                int(rec.get('practice_count') or 0),
+                int(rec.get('total_practice_minutes') or 0),
+            )
+        primary_program = None
+        if program_slugs:
+            primary_program = sorted(program_slugs, key=lambda n: _program_activity_score(n), reverse=True)[0]
         members.append({
             'slug': slug,
             'display_name': cv['display_name'],
             'pk_hash': cv.get('pk_hash'),
             'is_governor': bool(gov.get('is_governor')),
             'voting_rights': _coerce_voting_pct(gov.get('total_voting_power_pct') or gov.get('voting_power_pct')),
-            'primary_program': next(iter(cv.get('programs') or {}), None),
+            'primary_program': primary_program,
+            'programs': program_slugs,
             'has_dao_contributions': cv.get('has_dao_contributions', False),
             'has_elective_records': cv.get('has_elective_records', False),
             'total_tdg_controlled': dc_summary.get('total_tdg_issued') or 0,

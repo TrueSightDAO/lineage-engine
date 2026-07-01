@@ -693,6 +693,16 @@ def build(data_root: Path, write_pdfs: bool = True, write_narratives: bool = Tru
     aliases_path = data_root / '_cache' / 'aliases.json'
     aliases: dict[str, str] = read_json(aliases_path) or {} if aliases_path.is_file() else {}
 
+    # Sheets API — shared across pending chatlogs + live governor/voting fetch.
+    # Non-fatal: the build continues without live governance data if the API
+    # is unreachable (seed_dao_cvs.py's pre-seeded CV data is the fallback).
+    sheets_service = None
+    try:
+        from fetch_contributions import setup_google_sheets as _setup_sheets  # type: ignore
+        sheets_service = _setup_sheets()
+    except Exception as e:
+        print(f'  ⚠ Google Sheets API unavailable (governor/voting live fetch skipped): {e}', file=sys.stderr)
+
     # Phase 4.1 — fetch pending (submitted-but-unreviewed) Scored Chatlogs
     # entries once for the whole build, indexed by Contributor Name. Each
     # build_unified_cv call attaches the slice belonging to that CV's
@@ -702,16 +712,28 @@ def build(data_root: Path, write_pdfs: bool = True, write_narratives: bool = Tru
     # is unaffected.
     # Spec: agentic_ai_context/CREDENTIALING_PROGRAM_PAGES.md §18.
     pending_by_name: dict[str, list[dict[str, Any]]] = {}
-    if HAS_PENDING_FETCHER:
+    if HAS_PENDING_FETCHER and sheets_service is not None:
         try:
-            from fetch_contributions import setup_google_sheets as _setup_sheets  # type: ignore
-            sheets_service = _setup_sheets()
-            if sheets_service is not None:
-                pending_by_name = _fetch_pending_chatlogs(sheets_service)
+            pending_by_name = _fetch_pending_chatlogs(sheets_service)
         except Exception as e:
             print(f'  ⚠ pending chatlogs fetch failed (continuing): {e}', file=sys.stderr)
-    else:
+    elif not HAS_PENDING_FETCHER:
         print('  ⚠ pending chatlogs fetcher not importable — pending sections will be empty', file=sys.stderr)
+
+    # Live governor + voting-weight fetch from the Main Ledger. Fresh on every
+    # build so members.html shows the current governor roster without waiting
+    # for a manual seed_dao_cvs.py run. Pre-seeded CV governance data is the
+    # fallback when the Sheets API is unreachable.
+    live_governor_names: set[str] = set()
+    live_voting_map: dict[str, dict[str, Any]] = {}
+    if sheets_service is not None:
+        try:
+            from fetch_contributions import fetch_governors as _fetch_governors, fetch_voting_weights as _fetch_voting_weights  # type: ignore
+            live_governor_names = {n.lower() for n in _fetch_governors(sheets_service)}
+            live_voting_map = _fetch_voting_weights(sheets_service)
+            print(f'  🏛 live governors: {len(live_governor_names)} — {sorted(live_governor_names)[:5]}...')
+        except Exception as e:
+            print(f'  ⚠ live governor/voting fetch failed (falling back to pre-seeded CV data): {e}', file=sys.stderr)
 
     # First pass — assign canonical slugs for each pk-hash record.
     for pk_hash, rec in practitioners.items():
@@ -856,18 +878,41 @@ def build(data_root: Path, write_pdfs: bool = True, write_narratives: bool = Tru
         primary_program = None
         if program_slugs:
             primary_program = sorted(program_slugs, key=lambda n: _program_activity_score(n), reverse=True)[0]
+
+        # Resolve live governor/voting data for this display_name. Prefer
+        # live sheet data over pre-seeded CV governance (stale after manual
+        # seed_dao_cvs.py runs). Fall back to pre-seeded when sheets are
+        # unreachable.
+        display_lower = cv['display_name'].lower()
+        live_vw = live_voting_map.get(display_lower) or live_voting_map.get(cv['display_name']) or {}
+        is_gov = (
+            display_lower in live_governor_names
+            if live_governor_names
+            else bool(gov.get('is_governor'))
+        )
+        voting_pct = (
+            live_vw.get('total_voting_power_pct') or live_vw.get('voting_power_pct') or ''
+            if live_vw
+            else gov.get('total_voting_power_pct') or gov.get('voting_power_pct') or ''
+        )
+        live_tdg = (
+            live_vw.get('tdg_controlled')
+            if live_vw
+            else None
+        )
+
         members.append({
             'slug': slug,
             'display_name': cv['display_name'],
             'pk_hash': cv.get('pk_hash'),
-            'is_governor': bool(gov.get('is_governor')),
+            'is_governor': is_gov,
             'is_sentinel': False,
-            'voting_rights': _coerce_voting_pct(gov.get('total_voting_power_pct') or gov.get('voting_power_pct')),
+            'voting_rights': _coerce_voting_pct(voting_pct),
             'primary_program': primary_program,
             'programs': program_slugs,
             'has_dao_contributions': cv.get('has_dao_contributions', False),
             'has_elective_records': cv.get('has_elective_records', False),
-            'total_tdg_controlled': dc_summary.get('total_tdg_issued') or 0,
+            'total_tdg_controlled': float(live_tdg) if live_tdg is not None and str(live_tdg).strip() else (dc_summary.get('total_tdg_issued') or 0),
             'total_contributions': dc_summary.get('total_contributions') or 0,
             'last_updated': cv['generated_at'],
         })

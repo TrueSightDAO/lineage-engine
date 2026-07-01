@@ -42,6 +42,7 @@ import os
 import re
 import sys
 import unicodedata
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -224,6 +225,21 @@ def _load_program_url_map() -> dict[str, str]:
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
+DAO_MEMBERS_URL = (
+    'https://raw.githubusercontent.com/TrueSightDAO/treasury-cache/main/dao_members.json'
+)
+
+
+def _fetch_dao_members() -> list[dict[str, Any]]:
+    """Fetch dao_members.json from treasury-cache. Returns [] on any error."""
+    try:
+        with urllib.request.urlopen(DAO_MEMBERS_URL, timeout=30) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+            return (data.get('contributors') or []) if isinstance(data, dict) else []
+    except Exception as e:
+        print(f'  ⚠ dao_members fetch failed (sentinels absent): {e}', file=sys.stderr)
+        return []
 
 def slugify(name: str) -> str:
     """Lowercase + hyphenated friendly slug. Used when identity.json declares a name."""
@@ -845,6 +861,7 @@ def build(data_root: Path, write_pdfs: bool = True, write_narratives: bool = Tru
             'display_name': cv['display_name'],
             'pk_hash': cv.get('pk_hash'),
             'is_governor': bool(gov.get('is_governor')),
+            'is_sentinel': False,
             'voting_rights': _coerce_voting_pct(gov.get('total_voting_power_pct') or gov.get('voting_power_pct')),
             'primary_program': primary_program,
             'programs': program_slugs,
@@ -854,6 +871,47 @@ def build(data_root: Path, write_pdfs: bool = True, write_narratives: bool = Tru
             'total_contributions': dc_summary.get('total_contributions') or 0,
             'last_updated': cv['generated_at'],
         })
+
+    # Merge sentinel entries from dao_members.json — members flagged as
+    # sentinel on the Contributors contact information sheet (col W).
+    # Existing members get is_sentinel=True if their display_name matches
+    # a sentinel name. Sentinels without a CV (AI agents, bots) get
+    # synthetic entries with slug=None (non-clickable on members.html).
+    dao_contributors = _fetch_dao_members()
+    if dao_contributors:
+        sentinel_map: dict[str, dict[str, Any]] = {}
+        for c in dao_contributors:
+            name = (c.get('name') or '').strip()
+            roles = c.get('roles') or []
+            if not name or 'sentinel' not in roles:
+                continue
+            sentinel_map[name] = c
+
+        # Mark existing members with matching display_name
+        for m in members:
+            if m['display_name'] in sentinel_map:
+                m['is_sentinel'] = True
+                del sentinel_map[m['display_name']]
+
+        # Append synthetic entries for sentinels without CVs
+        for name, c in sorted(sentinel_map.items()):
+            roles = c.get('roles') or []
+            voting_pct_str = c.get('total_voting_power_pct') or ''
+            members.append({
+                'slug': None,
+                'display_name': name,
+                'pk_hash': None,
+                'is_governor': 'governor' in roles,
+                'is_sentinel': True,
+                'voting_rights': _coerce_voting_pct(voting_pct_str),
+                'primary_program': None,
+                'programs': [],
+                'has_dao_contributions': False,
+                'has_elective_records': False,
+                'total_tdg_controlled': c.get('voting_rights') or 0,
+                'total_contributions': 0,
+                'last_updated': '',
+            })
 
     write_json(data_root / '_cache' / 'index.json', {
         'generated_at': now_utc_iso(),

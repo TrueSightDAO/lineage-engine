@@ -42,7 +42,6 @@ import os
 import re
 import sys
 import unicodedata
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -82,7 +81,7 @@ except Exception:
     _PENDING_FLOOR_DATE = '2024-12-13'
 
 
-# Credential profile URL — what the per-slug QR code resolves to.
+# Credential profile URL pattern — what the per-slug QR code resolves to.
 CREDENTIAL_PROFILE_URL = 'https://truesight.me/credentials/#{slug}'
 
 # Per-program credential URL — surface where partner-co-branded QR codes resolve.
@@ -97,12 +96,6 @@ PROGRAM_CREDENTIAL_URL = 'https://truesight.me/programs/{program}/credentials/#{
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROGRAM_ASSETS_DIR = SCRIPT_DIR / 'program_assets'
 PROGRAM_ASSETS_REGISTRY = PROGRAM_ASSETS_DIR / 'registry.json'
-
-# URL for the DAO members ledger — used to identify sentinels and merge
-# them into the index as synthetic entries (no CV, no practice events).
-DAO_MEMBERS_URL = (
-    'https://raw.githubusercontent.com/TrueSightDAO/treasury-cache/main/dao_members.json'
-)
 
 
 def _load_cert_config(url_program_slug: str) -> dict[str, Any] | None:
@@ -209,7 +202,7 @@ def _load_program_url_map() -> dict[str, str]:
 
     Source of truth: `program_assets/registry.json`. The two slug spaces
     can diverge (legacy data-side `capoeira-tribo-mirim` vs URL-side
-    `tribomirim-bahia`) so the registry holds an explicit mapping rather than
+    `tribomirim`) so the registry holds an explicit mapping rather than
     relying on equality. Missing entries fall back to identity so newly-
     onboarded partners that use the same slug on both sides work without
     extra registry plumbing.
@@ -231,7 +224,6 @@ def _load_program_url_map() -> dict[str, str]:
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
-
 
 def slugify(name: str) -> str:
     """Lowercase + hyphenated friendly slug. Used when identity.json declares a name."""
@@ -271,7 +263,6 @@ def write_json(path: Path, obj: Any) -> None:
 # ---------------------------------------------------------------------------
 # practice-events aggregation
 # ---------------------------------------------------------------------------
-
 
 def collect_practitioners(data_root: Path) -> dict[str, dict[str, Any]]:
     """Walk programs/*/pk-*/ and return one record per pk-hash."""
@@ -340,7 +331,6 @@ def derive_slug(pk_hash: str, identity: dict[str, Any], aliases: dict[str, str])
 # preserved migrated CVs (Fatima, Emelin) → seed index
 # ---------------------------------------------------------------------------
 
-
 def _coerce_voting_pct(raw: Any) -> float:
     """Convert a voting-weight cell ("0.20%" or 0.002) to a float 0-100."""
     if raw in (None, ''):
@@ -358,229 +348,356 @@ def collect_preserved_cvs(data_root: Path) -> dict[str, dict[str, Any]]:
     """Pre-existing _cache/cv/<slug>.json entries that aren't tied to a pk-hash yet.
 
     These are the migrated Fatima / Emelin testimonials. They get indexed so
-    the directory page shows them alongside practitioner CVs.
+    the directory page shows them, even though they have no practice events
+    yet. The FULL source JSON is kept under the `source` key so the unified
+    output preserves every field (raw_contributions, analysis, etc.) and the
+    builder can re-run on its own output without losing data.
+
+    Detection: a preserved CV is any `_cache/cv/<slug>.json` that:
+      - doesn't have a `pk-` slug prefix (those are practitioner-derived);
+      - doesn't already look like a builder-produced unified CV (we mark
+        those with `_generator: "build_cv_cache"`).
     """
     cv_dir = data_root / '_cache' / 'cv'
+    out: dict[str, dict[str, Any]] = {}
     if not cv_dir.is_dir():
-        return {}
-    preserved: dict[str, dict[str, Any]] = {}
-    for f in sorted(cv_dir.glob('*.json')):
-        slug = f.stem
-        if '__' in slug:
-            continue  # skip program-scoped QR / cert artifacts
-        data = read_json(f)
-        if data is not None and isinstance(data, dict):
-            preserved[slug] = data
-    return preserved
+        return out
+    for jf in sorted(cv_dir.glob('*.json')):
+        slug = jf.stem
+        if slug.startswith('pk-'):
+            continue
+        data = read_json(jf)
+        if not data:
+            continue
+        # If this file was produced by a previous builder run, extract the
+        # original `source` payload that the first run preserved. Otherwise
+        # treat the whole file as the source.
+        if isinstance(data, dict) and data.get('_generator') == 'build_cv_cache':
+            source = (data.get('dao_contributions') or {}).get('source') or {}
+        else:
+            source = data
+        summary = (source.get('summary') or {}) if isinstance(source, dict) else {}
+        governance = (source.get('governance') or {}) if isinstance(source, dict) else {}
+        out[slug] = {
+            'slug': slug,
+            'display_name': (source.get('contributor_name') if isinstance(source, dict) else None) or slug,
+            'source': source,
+            'governance': governance,
+            'total_contributions': summary.get('total_contributions', 0),
+            'total_tdg_provisioned': summary.get('total_tdg_provisioned', 0),
+            'date_range': summary.get('date_range', {}),
+        }
+    return out
 
 
 # ---------------------------------------------------------------------------
-# unified CV builder
+# CV rendering
 # ---------------------------------------------------------------------------
-
 
 def build_unified_cv(
     slug: str,
-    practitioner: dict[str, Any] | None,
+    pk_record: dict[str, Any] | None,
     preserved: dict[str, Any] | None,
     *,
     pending_by_name: dict[str, list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
-    """Merge practitioner data + preserved testimonial into one CV dict.
+    """Merge practitioner record (if any) with preserved testimonial (if any).
 
-    The unified CV is the canonical per-person artifact. It contains:
-      - display_name, pk_hash, generated_at
-      - programs (per-program breakdown with practice_events)
-      - dao_contributions (from preserved testimonial, if any)
-      - governance (is_governor, voting_rights)
-      - narrative (Grok-generated, cached)
-      - has_dao_contributions, has_elective_records (boolean flags)
+    `pending_by_name` is a Phase 4.1 hook (§18) — when supplied, look up
+    pending Scored Chatlogs entries by this CV's display_name and attach
+    them under cv['pending_contributions']. The HTML credential page
+    renders this as a separate "Recent activity (pending review)"
+    section with caveat banner; the markdown→PDF path ignores it.
     """
-    now = now_utc_iso()
+    identity = (pk_record or {}).get('identity') or {}
+    names = identity.get('names') or []
+    display_name = (
+        names[0] if names else (preserved or {}).get('display_name') or slug
+    )
+    programs = (pk_record or {}).get('programs') or {}
+
     cv: dict[str, Any] = {
         'slug': slug,
-        'display_name': slug,
-        'pk_hash': None,
-        'generated_at': now,
-        'programs': {},
-        'dao_contributions': None,
-        'governance': {},
-        'narrative': None,
-        'has_dao_contributions': False,
-        'has_elective_records': False,
+        'display_name': display_name,
+        'pk_hash': (pk_record or {}).get('pk_hash'),
+        'identity': identity,
+        'generated_at': now_utc_iso(),
+        'has_elective_records': bool(programs and any(p['practice_count'] for p in programs.values())),
+        'has_dao_contributions': bool(preserved),
+        'programs': {
+            name: {
+                'display_name': p['display_name'],
+                'lineage_root': p['lineage_root'],
+                'source_pages': p.get('source_pages') or [],
+                'practice_count': p['practice_count'],
+                'total_practice_minutes': p['total_practice_minutes'],
+                'recent_events': sorted(
+                    p['practice_events'],
+                    key=lambda e: (e.get('captured_at') or ''),
+                    reverse=True,
+                )[:20],
+            }
+            for name, p in programs.items()
+        },
+    }
+    if preserved:
+        # Preserve the full source payload so the unified cv.json is a strict
+        # superset of the input — re-running the builder on its own output
+        # never loses data (raw_contributions, analysis, etc. all stay intact).
+        cv['dao_contributions'] = {
+            'total_contributions': preserved.get('total_contributions'),
+            'total_tdg_provisioned': preserved.get('total_tdg_provisioned'),
+            'date_range': preserved.get('date_range'),
+            'source': preserved.get('source'),
+        }
+        cv['governance'] = preserved.get('governance') or {}
+    cv['qr_code'] = {
+        'path': f'_cache/cv/{slug}.qr.png',
+        'target_url': CREDENTIAL_PROFILE_URL.format(slug=slug),
     }
 
-    if practitioner:
-        identity = practitioner.get('identity') or {}
-        names = identity.get('names') or []
-        cv['display_name'] = names[0] if names else slug
-        cv['pk_hash'] = practitioner['pk_hash']
-        cv['programs'] = practitioner.get('programs') or {}
-        # Elective records: any program with practice events counts
-        cv['has_elective_records'] = any(
-            p.get('practice_count', 0) > 0 for p in cv['programs'].values()
-        )
+    # Phase 4.1 — attach pending Scored Chatlogs entries indexed by
+    # display_name. Empty list (vs missing) means "looked up, none
+    # found" — page renderer can use that signal to suppress the
+    # section entirely. Dedup is owned by the operator's promotion
+    # GAS via Scored Chatlogs col L (already filtered in fetcher).
+    if pending_by_name is not None:
+        cv['pending_contributions'] = {
+            'source_tab': 'Scored Chatlogs',
+            'source_url': 'https://docs.google.com/spreadsheets/d/1Tbj7H5ur_egQLRugdXUaSIhEYIKp0vvVv2IZ7WTLCUo/edit',
+            'floor_date': _PENDING_FLOOR_DATE,
+            'entries': pending_by_name.get(display_name, []),
+        }
 
-    if preserved:
-        # Merge preserved fields into the CV, preserving practitioner
-        # fields where they exist (practitioner data takes precedence).
-        for key in ('display_name', 'pk_hash', 'generated_at', 'programs'):
-            if key in preserved and not (key == 'programs' and practitioner):
-                cv[key] = preserved[key]
-        dc = preserved.get('dao_contributions')
-        if dc:
-            cv['dao_contributions'] = dc
-            cv['has_dao_contributions'] = True
-        gov = preserved.get('governance')
-        if gov:
-            cv['governance'] = gov
-
+    cv['_generator'] = 'build_cv_cache'
     return cv
 
 
-# ---------------------------------------------------------------------------
-# Markdown + PDF rendering
-# ---------------------------------------------------------------------------
-
-
-def render_html(cv: dict[str, Any], md: str, qr_path: Path | None = None) -> str:
-    """Wrap the Markdown body in a minimal HTML document for WeasyPrint.
-
-    The QR code image (if present) is embedded as a data URI so the PDF
-    is self-contained — no external file references.
-    """
-    qr_data_uri = ''
-    if qr_path and qr_path.is_file():
-        import base64
-        b64 = base64.b64encode(qr_path.read_bytes()).decode('ascii')
-        qr_data_uri = f'data:image/png;base64,{b64}'
-
-    # Inline CSS for a clean, job-application-grade PDF.
-    return f'''<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<style>
-  @page {{
-    size: A4;
-    margin: 2cm 2.5cm;
-  }}
-  body {{
-    font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
-    font-size: 11pt;
-    line-height: 1.5;
-    color: #222;
-  }}
-  h1 {{ font-size: 20pt; margin-bottom: 0.2em; }}
-  h2 {{ font-size: 14pt; margin-top: 1.5em; margin-bottom: 0.5em;
-        border-bottom: 1px solid #ccc; padding-bottom: 0.2em; }}
-  h3 {{ font-size: 12pt; margin-top: 1em; margin-bottom: 0.3em; }}
-  .meta {{ color: #666; font-size: 10pt; margin-bottom: 1.5em; }}
-  .qr {{ text-align: center; margin: 2em 0; }}
-  .qr img {{ width: 120px; height: 120px; }}
-  ul {{ padding-left: 1.5em; }}
-  li {{ margin-bottom: 0.3em; }}
-  .program-section {{ page-break-inside: avoid; }}
-</style>
-</head>
-<body>
-<div class="qr">{"<img src='" + qr_data_uri + "'>" if qr_data_uri else ''}</div>
-{md}
-</body>
-</html>'''
-
-
-def render_md(cv: dict[str, Any]) -> str:
-    """Render a human-readable Markdown CV from the unified CV dict."""
-    lines: list[str] = []
-    name = cv.get('display_name') or cv['slug']
-    lines.append(f'# {name}')
+def render_markdown(cv: dict[str, Any]) -> str:
+    lines = []
+    lines.append(f"# {cv['display_name']}")
     lines.append('')
 
-    programs = cv.get('programs') or {}
-    if programs:
-        lines.append('## Practice Activity')
-        lines.append('')
-        for prog_slug, prog in sorted(programs.items()):
-            pname = prog.get('display_name', prog_slug)
-            count = prog.get('practice_count', 0)
-            minutes = prog.get('total_practice_minutes', 0)
-            if count > 0:
-                lines.append(f'### {pname}')
-                lines.append(f'- **{count}** practice sessions')
-                lines.append(f'- **{minutes}** total minutes')
-                lines.append('')
-                for ev in (prog.get('practice_events') or []):
-                    payload = ev.get('payload') or {}
-                    ts = ev.get('captured_at', '')
-                    desc = payload.get('description', '')
-                    dur = payload.get('total_practice_minutes', 0)
-                    lines.append(f'- {ts} — {desc or "Practice session"} ({dur} min)')
-                lines.append('')
+    gov = cv.get('governance') or {}
+    pills = []
+    if gov.get('is_governor'):
+        pills.append('Governor')
+    if cv.get('has_dao_contributions'):
+        pills.append('DAO Contributor')
+    if cv.get('has_elective_records'):
+        pills.append('Practitioner')
+    if pills:
+        lines.append(f"*{' · '.join(pills)} · TrueSight DAO Credential Profile · generated {cv['generated_at']}*")
+    else:
+        lines.append(f"*TrueSight DAO Credential Profile · generated {cv['generated_at']}*")
+    lines.append('')
 
-    dc = cv.get('dao_contributions')
-    if dc:
+    narrative = (cv.get('narrative') or {}).get('text') if isinstance(cv.get('narrative'), dict) else ''
+    if narrative:
+        lines.append(narrative)
+        lines.append('')
+        model = (cv.get('narrative') or {}).get('model') or 'grok'
+        lines.append(f"*AI-generated summary from ledger data and practice events. Model: {model}.*")
+        lines.append('')
+
+    if cv.get('has_dao_contributions'):
+        dc = cv['dao_contributions']
         lines.append('## DAO Contributions')
         lines.append('')
-        src = (dc.get('source') or {}) if isinstance(dc, dict) else {}
-        summary = (src.get('summary') or {}) if isinstance(src, dict) else {}
-        tdg = summary.get('total_tdg_issued', 0)
-        contribs = summary.get('total_contributions', 0)
-        lines.append(f'- **{tdg}** TDG issued')
-        lines.append(f'- **{contribs}** contributions')
+        lines.append(f"- Total contributions: **{dc.get('total_contributions', 0)}**")
+        if dc.get('total_tdg_provisioned'):
+            lines.append(f"- Total TDG provisioned: **{dc['total_tdg_provisioned']:,.2f}**")
+        dr = dc.get('date_range') or {}
+        if dr.get('earliest') and dr.get('latest'):
+            lines.append(f"- Active period: {dr['earliest']} – {dr['latest']}")
+        lines.append(f"- Source: [_cache/cv/{cv['slug']}.json](https://github.com/TrueSightDAO/lineage-credentials/blob/main/_cache/cv/{cv['slug']}.json)")
         lines.append('')
 
-    narrative = cv.get('narrative')
-    if narrative and isinstance(narrative, dict):
-        text = narrative.get('text', '')
-        if text:
-            lines.append('## Narrative')
+    for program_name, p in cv.get('programs', {}).items():
+        lines.append(f"## {p['display_name']}")
+        lines.append('')
+        lines.append(f"- Practice sessions logged: **{p['practice_count']}**")
+        lines.append(f"- Total practice time: **{p['total_practice_minutes']} minutes**")
+        if p.get('lineage_root'):
+            lines.append(f"- Lineage root: {p['lineage_root']}")
+        if p['recent_events']:
             lines.append('')
-            lines.append(text)
-            lines.append('')
+            lines.append('### Recent sessions')
+            for e in p['recent_events'][:10]:
+                cap = e.get('captured_at', '?')
+                theme = ((e.get('payload') or {}).get('theme')) or e.get('practice_type', '')
+                mins = (e.get('payload') or {}).get('total_practice_minutes', 0)
+                src = e.get('_path', '')
+                src_link = f"[{src}](https://github.com/TrueSightDAO/lineage-credentials/blob/main/{src})" if src else ''
+                lines.append(f"- **{cap}** — {theme} ({mins} min) — {src_link}")
+        lines.append('')
+
+    if not cv.get('has_dao_contributions') and not cv.get('programs'):
+        lines.append('_No records yet._')
 
     lines.append('---')
-    lines.append(f'*Generated at {cv.get("generated_at", "")}*')
-    return '\n'.join(lines)
+    lines.append('')
+    lines.append('TrueSight DAO Credential Profile. Every claim above cites the line in the underlying ledger or repo — open the source link to audit.')
+    return '\n'.join(lines) + '\n'
 
 
-def render_pdf(html: str, out_path: Path) -> None:
-    """Render HTML to PDF via WeasyPrint. No-op if WeasyPrint unavailable."""
-    if not HAS_WEASYPRINT:
-        return
-    try:
-        HTML(string=html).write_pdf(str(out_path))
-    except Exception as e:
-        print(f'  ⚠ PDF render failed for {out_path.name}: {e}', file=sys.stderr)
+def render_html(cv: dict[str, Any], md_body: str, qr_path: Path | None = None) -> str:
+    """Minimal HTML wrap of the Markdown body for WeasyPrint.
+
+    Inline a small stylesheet that targets 'respectable job-application CV'
+    typography per the CREDENTIALING_PLATFORM.md decision. When qr_path is
+    provided and exists, the PDF gets a business-card-style QR in the top-right
+    of page 1 that points back to the credential profile URL.
+    """
+    # Markdown → very-light HTML conversion (paragraphs + headings + lists).
+    # Keeping this dep-free for now; can swap to python-markdown later.
+    html_body = []
+    in_list = False
+    for line in md_body.split('\n'):
+        stripped = line.rstrip()
+        if stripped.startswith('### '):
+            if in_list:
+                html_body.append('</ul>')
+                in_list = False
+            html_body.append(f'<h3>{stripped[4:]}</h3>')
+        elif stripped.startswith('## '):
+            if in_list:
+                html_body.append('</ul>')
+                in_list = False
+            html_body.append(f'<h2>{stripped[3:]}</h2>')
+        elif stripped.startswith('# '):
+            if in_list:
+                html_body.append('</ul>')
+                in_list = False
+            html_body.append(f'<h1>{stripped[2:]}</h1>')
+        elif stripped.startswith('- '):
+            if not in_list:
+                html_body.append('<ul>')
+                in_list = True
+            item = stripped[2:]
+            # tiny inline markdown: **bold**, *italic*, [text](url)
+            item = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', item)
+            item = re.sub(r'\*(.+?)\*', r'<em>\1</em>', item)
+            item = re.sub(r'\[(.+?)\]\((.+?)\)', r'<a href="\2">\1</a>', item)
+            html_body.append(f'<li>{item}</li>')
+        elif stripped == '---':
+            if in_list:
+                html_body.append('</ul>')
+                in_list = False
+            html_body.append('<hr/>')
+        elif stripped == '':
+            if in_list:
+                html_body.append('</ul>')
+                in_list = False
+        else:
+            if in_list:
+                html_body.append('</ul>')
+                in_list = False
+            line_html = stripped
+            line_html = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', line_html)
+            line_html = re.sub(r'\*(.+?)\*', r'<em>\1</em>', line_html)
+            line_html = re.sub(r'\[(.+?)\]\((.+?)\)', r'<a href="\2">\1</a>', line_html)
+            html_body.append(f'<p>{line_html}</p>')
+    if in_list:
+        html_body.append('</ul>')
+
+    css = """
+      @page { size: A4; margin: 22mm 18mm 22mm 18mm; }
+      body { font-family: 'Source Serif Pro', Georgia, serif; color: #1a1a1a; font-size: 11pt; line-height: 1.5; }
+      h1 { font-family: 'Source Sans Pro', 'Helvetica Neue', Arial, sans-serif; font-size: 26pt; margin: 0 0 4pt 0; color: #111; }
+      h2 { font-family: 'Source Sans Pro', 'Helvetica Neue', Arial, sans-serif; font-size: 13pt; text-transform: uppercase; letter-spacing: 0.08em; color: #333; border-bottom: 1px solid #c8c8c8; padding-bottom: 3pt; margin-top: 18pt; }
+      h3 { font-family: 'Source Sans Pro', 'Helvetica Neue', Arial, sans-serif; font-size: 11pt; color: #555; margin-top: 12pt; }
+      ul { padding-left: 18pt; }
+      li { margin: 2pt 0; }
+      em { color: #555; }
+      a { color: #245785; text-decoration: none; }
+      hr { border: none; border-top: 1px solid #e0e0e0; margin: 18pt 0; }
+      p { margin: 4pt 0; }
+      .cv-qr { float: right; width: 28mm; margin: 0 0 4mm 6mm; }
+      .cv-qr img { display: block; width: 28mm; height: 28mm; }
+      .cv-qr-caption { font-family: 'Source Sans Pro', 'Helvetica Neue', Arial, sans-serif; font-size: 6.5pt; color: #888; text-align: center; margin-top: 1mm; letter-spacing: 0.04em; }
+    """
+
+    qr_block = ''
+    if qr_path and Path(qr_path).is_file():
+        qr_uri = Path(qr_path).resolve().as_uri()
+        qr_block = (
+            f"<div class='cv-qr'>"
+            f"<img src='{qr_uri}' alt='Scan to view profile'/>"
+            f"<div class='cv-qr-caption'>scan to view profile</div>"
+            f"</div>"
+        )
+
+    return f"""<!DOCTYPE html>
+<html><head><meta charset='utf-8'><style>{css}</style></head>
+<body>{qr_block}{''.join(html_body)}</body></html>"""
 
 
-def render_qr(slug: str, url: str, out_path: Path, *, logo_path: Path | None = None) -> bool:
-    """Generate a QR code PNG for the given URL. Returns True on success."""
+def render_qr(slug: str, target_url: str, out_path: Path, logo_path: Path | None = None) -> bool:
+    """Write a QR PNG that resolves to ``target_url`` with a centred logo.
+
+    When ``logo_path`` is omitted, the default TrueSight icon is used (canonical
+    credentials surface). For per-program QRs, pass the vendored partner logo
+    at ``program_assets/<program-slug>/logo.png``.
+    """
     if not HAS_QR:
+        print(f'  ⚠ skipping QR (qrcode/Pillow not installed): {out_path}', file=sys.stderr)
         return False
     try:
-        _generate_qr_with_logo(url, str(out_path), logo_path=str(logo_path) if logo_path else None)
+        if logo_path is not None:
+            _generate_qr_with_logo(target_url, out_path, logo_path=logo_path)
+        else:
+            _generate_qr_with_logo(target_url, out_path)
         return True
     except Exception as e:
-        print(f'  ⚠ QR render failed for {slug}: {e}', file=sys.stderr)
+        print(f'  ⚠ QR render failed for {out_path}: {e}', file=sys.stderr)
+        return False
+
+
+def render_pdf(html: str, out_path: Path) -> bool:
+    if not HAS_WEASYPRINT:
+        print(f'  ⚠ skipping PDF (weasyprint not installed): {out_path}', file=sys.stderr)
+        return False
+    try:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        HTML(string=html).write_pdf(str(out_path))
+        return True
+    except Exception as e:
+        print(f'  ⚠ PDF render failed for {out_path}: {e}', file=sys.stderr)
         return False
 
 
 # ---------------------------------------------------------------------------
-# main build
+# main pipeline
 # ---------------------------------------------------------------------------
 
-
-def build(data_root: Path, *, write_pdfs: bool = True, write_narratives: bool = True) -> dict[str, Any]:
-    """Build the full CV cache. Returns a stats dict."""
+def build(data_root: Path, write_pdfs: bool = True, write_narratives: bool = True) -> dict[str, Any]:
     practitioners = collect_practitioners(data_root)
     preserved = collect_preserved_cvs(data_root)
     aliases_path = data_root / '_cache' / 'aliases.json'
+    aliases: dict[str, str] = read_json(aliases_path) or {} if aliases_path.is_file() else {}
 
-    # Load existing aliases so we don't re-derive slugs for every pk-hash
-    aliases: dict[str, str] = read_json(aliases_path) or {}
+    # Phase 4.1 — fetch pending (submitted-but-unreviewed) Scored Chatlogs
+    # entries once for the whole build, indexed by Contributor Name. Each
+    # build_unified_cv call attaches the slice belonging to that CV's
+    # display_name. Quietly degrades to an empty map if sheets API isn't
+    # reachable (no credentials in the CI environment, transient failure,
+    # etc.) — pending list is best-effort; canonical Ledger history record
+    # is unaffected.
+    # Spec: agentic_ai_context/CREDENTIALING_PROGRAM_PAGES.md §18.
+    pending_by_name: dict[str, list[dict[str, Any]]] = {}
+    if HAS_PENDING_FETCHER:
+        try:
+            from fetch_contributions import setup_google_sheets as _setup_sheets  # type: ignore
+            sheets_service = _setup_sheets()
+            if sheets_service is not None:
+                pending_by_name = _fetch_pending_chatlogs(sheets_service)
+        except Exception as e:
+            print(f'  ⚠ pending chatlogs fetch failed (continuing): {e}', file=sys.stderr)
+    else:
+        print('  ⚠ pending chatlogs fetcher not importable — pending sections will be empty', file=sys.stderr)
 
-    # First pass — ensure every pk-hash has a slug
+    # First pass — assign canonical slugs for each pk-hash record.
     for pk_hash, rec in practitioners.items():
         aliases[pk_hash] = derive_slug(pk_hash, rec.get('identity') or {}, aliases)
 
@@ -623,34 +740,45 @@ def build(data_root: Path, *, write_pdfs: bool = True, write_narratives: bool = 
                 narrative_errors += 1
                 if existing_narrative and existing_narrative.get('text'):
                     cv['narrative'] = existing_narrative
+            elif n.get('cached'):
+                narrative_hits += 1
+                cv['narrative'] = {
+                    'text': n.get('narrative') or '',
+                    'model': n.get('model') or '',
+                    'prompt_version': n.get('prompt_version') or '',
+                    'source_hash': n.get('source_hash') or '',
+                    'cached': True,
+                }
             else:
-                cv['narrative'] = n
                 narrative_calls += 1
-                if n.get('cache_hit'):
-                    narrative_hits += 1
+                cv['narrative'] = {
+                    'text': n.get('narrative') or '',
+                    'model': n.get('model') or '',
+                    'prompt_version': n.get('prompt_version') or '',
+                    'source_hash': n.get('source_hash') or '',
+                    'cached': False,
+                }
         elif existing_narrative and existing_narrative.get('text'):
-            # No Grok available this run — preserve the last narrative
+            # Grok module not available at all (e.g. import failed). Still
+            # carry forward whatever previous run produced.
             cv['narrative'] = existing_narrative
-
-        # Write per-slug JSON
-        write_json(cv_dir / f'{slug}.json', cv)
-
-        # Render Markdown
-        md = render_md(cv)
-        write_json(cv_dir / f'{slug}.md', md)  # stored as .md but written via write_json for consistency
-
-        # Render QR + PDF for the main credential profile
-        profile_url = CREDENTIAL_PROFILE_URL.format(slug=slug)
+        qr_target = (cv.get('qr_code') or {}).get('target_url') or CREDENTIAL_PROFILE_URL.format(slug=slug)
         qr_path = cv_dir / f'{slug}.qr.png'
-        ok = render_qr(slug, profile_url, qr_path)
-        if ok and write_pdfs:
+        render_qr(slug, qr_target, qr_path)
+        write_json(cv_dir / f'{slug}.json', cv)
+        md = render_markdown(cv)
+        (cv_dir / f'{slug}.md').write_text(md, encoding='utf-8')
+        if write_pdfs:
             render_pdf(render_html(cv, md, qr_path), cv_dir / f'{slug}.pdf')
 
-        # Per-program credential QR codes + PDFs + certificates
-        #
-        # Each program the member participates in gets its own QR code
-        # that resolves to the program-scoped credential page and a PDF
-        # that embeds that QR.
+        # Phase 3a — per-program QR + PDF artifacts. For each program this
+        # CV participates in, resolve the URL-side slug via the registry
+        # at `program_assets/registry.json`, then emit a sibling
+        # `<slug>__<url-slug>.qr.png` whose centre carries the partner
+        # logo (vendored at `program_assets/<url-slug>/logo.png`) and
+        # whose payload is the production URL of the program-scoped
+        # credential surface. The matching `<slug>__<url-slug>.pdf`
+        # embeds that QR.
         #
         # A program without a vendored logo is silently skipped — partner
         # onboarding shouldn't block on the logo being committed first.
@@ -703,7 +831,6 @@ def build(data_root: Path, *, write_pdfs: bool = True, write_narratives: bool = 
         # member joins a new program with an alphabetically-earlier slug.
         programs_dict = cv.get('programs') or {}
         program_slugs = list(programs_dict.keys())
-
         def _program_activity_score(name: str) -> tuple[int, int]:
             rec = programs_dict.get(name) or {}
             return (
@@ -718,9 +845,7 @@ def build(data_root: Path, *, write_pdfs: bool = True, write_narratives: bool = 
             'display_name': cv['display_name'],
             'pk_hash': cv.get('pk_hash'),
             'is_governor': bool(gov.get('is_governor')),
-            'is_sentinel': False,
-            'voting_rights': _coerce_voting_pct(gov.get('total_voting_power_pct')
-                                                or gov.get('voting_power_pct')),
+            'voting_rights': _coerce_voting_pct(gov.get('total_voting_power_pct') or gov.get('voting_power_pct')),
             'primary_program': primary_program,
             'programs': program_slugs,
             'has_dao_contributions': cv.get('has_dao_contributions', False),
@@ -729,59 +854,6 @@ def build(data_root: Path, *, write_pdfs: bool = True, write_narratives: bool = 
             'total_contributions': dc_summary.get('total_contributions') or 0,
             'last_updated': cv['generated_at'],
         })
-
-    # ── Sentinel merge ──────────────────────────────────────────────
-    # Fetch dao_members.json to identify sentinels (roles includes 'sentinel')
-    # and merge them into the index as synthetic entries with is_sentinel=True.
-    try:
-        req = urllib.request.Request(DAO_MEMBERS_URL, headers={'User-Agent': 'lineage-engine/1.0'})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            dao_data = json.loads(resp.read().decode('utf-8'))
-    except Exception as e:
-        print(f'  ⚠ could not fetch dao_members.json for sentinel merge: {e}', file=sys.stderr)
-        dao_data = None
-
-    if dao_data:
-        # Build sentinel name set from dao_members.json
-        sentinel_names: set[str] = set()
-        sentinel_raw: dict[str, dict] = {}
-        for c in (dao_data.get('contributors') or []):
-            roles = c.get('roles') or []
-            if 'sentinel' in roles:
-                name = c.get('name', '')
-                sentinel_names.add(name)
-                sentinel_raw[name] = c
-
-        # Mark existing members that are sentinels
-        existing_names = {m['display_name'] for m in members}
-        for m in members:
-            if m['display_name'] in sentinel_names:
-                m['is_sentinel'] = True
-
-        # Append synthetic entries for sentinels without a CV
-        for name in sorted(sentinel_names):
-            if name in existing_names:
-                continue
-            raw = sentinel_raw.get(name, {})
-            members.append({
-                'slug': None,  # non-clickable
-                'display_name': name,
-                'pk_hash': None,
-                'is_governor': False,
-                'is_sentinel': True,
-                'voting_rights': _coerce_voting_pct(raw.get('total_voting_power_pct')),
-                'primary_program': None,
-                'programs': [],
-                'has_dao_contributions': False,
-                'has_elective_records': False,
-                'total_tdg_controlled': float(raw.get('voting_rights', 0) or 0),
-                'total_contributions': 0,
-                'last_updated': dao_data.get('generated_at', ''),
-            })
-    else:
-        # Fetch failed — ensure no stale is_sentinel flags linger
-        for m in members:
-            m.pop('is_sentinel', None)
 
     write_json(data_root / '_cache' / 'index.json', {
         'generated_at': now_utc_iso(),

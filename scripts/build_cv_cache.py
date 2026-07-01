@@ -970,6 +970,40 @@ def build(data_root: Path, write_pdfs: bool = True, write_narratives: bool = Tru
                 'last_updated': '',
             })
 
+    # Merge orphan governors — names in the live governor list that have no
+    # CV entry (newly-seated governors before seed_dao_cvs.py re-runs).
+    # Append synthetic entries with whatever voting data we have from the
+    # live fetch so they appear on members.html immediately.
+    if live_governor_names:
+        existing_names_lower = {m['display_name'].lower() for m in members}
+        for gov_name_lower in sorted(live_governor_names):
+            if gov_name_lower in existing_names_lower:
+                continue
+            # Find the original-cased name from the voting map or capitalise
+            display_name = gov_name_lower
+            for k in live_voting_map:
+                if k.lower() == gov_name_lower:
+                    display_name = k
+                    break
+            vw = live_voting_map.get(display_name) or live_voting_map.get(gov_name_lower) or {}
+            members.append({
+                'slug': None,
+                'display_name': display_name,
+                'pk_hash': None,
+                'is_governor': True,
+                'is_sentinel': False,
+                'voting_rights': _coerce_voting_pct(
+                    vw.get('total_voting_power_pct') or vw.get('voting_power_pct') or ''
+                ),
+                'primary_program': None,
+                'programs': [],
+                'has_dao_contributions': False,
+                'has_elective_records': False,
+                'total_tdg_controlled': _safe_float(vw.get('tdg_controlled')),
+                'total_contributions': 0,
+                'last_updated': '',
+            })
+
     write_json(data_root / '_cache' / 'index.json', {
         'generated_at': now_utc_iso(),
         'count': len(members),

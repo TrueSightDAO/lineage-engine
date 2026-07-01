@@ -347,6 +347,18 @@ def derive_slug(pk_hash: str, identity: dict[str, Any], aliases: dict[str, str])
 # preserved migrated CVs (Fatima, Emelin) → seed index
 # ---------------------------------------------------------------------------
 
+def _safe_float(value: Any) -> float:
+    """Coerce a sheet cell value to float, handling commas and empty strings."""
+    if value in (None, '', 0):
+        return 0.0
+    if isinstance(value, str):
+        value = value.strip().replace(',', '')
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _coerce_voting_pct(raw: Any) -> float:
     """Convert a voting-weight cell ("0.20%" or 0.002) to a float 0-100."""
     if raw in (None, ''):
@@ -912,7 +924,7 @@ def build(data_root: Path, write_pdfs: bool = True, write_narratives: bool = Tru
             'programs': program_slugs,
             'has_dao_contributions': cv.get('has_dao_contributions', False),
             'has_elective_records': cv.get('has_elective_records', False),
-            'total_tdg_controlled': float(live_tdg) if live_tdg is not None and str(live_tdg).strip() else (dc_summary.get('total_tdg_issued') or 0),
+            'total_tdg_controlled': _safe_float(live_tdg) if live_tdg is not None and str(live_tdg).strip() else (dc_summary.get('total_tdg_issued') or 0),
             'total_contributions': dc_summary.get('total_contributions') or 0,
             'last_updated': cv['generated_at'],
         })

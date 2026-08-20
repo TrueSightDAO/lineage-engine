@@ -1,81 +1,85 @@
 {
-  "schema_version": 1,
-  "strategy": "pdf_overlay",
-  "pdf_template": "cert_template.pdf",
-  "page_size_pt": { "width": 841.89, "height": 595.28, "orientation": "landscape (A4)" },
-  "font_files": [
-    "fonts/CormorantGaramond-VariableFont_wght.ttf",
-    "fonts/CormorantGaramond-Italic-VariableFont_wght.ttf",
-    "fonts/Inter-VariableFont_opsz-wght.ttf",
-    "fonts/GreatVibes-Regular.ttf"
-  ],
-  "overlay_fields": {
-    "recipient_name": {
-      "x_pt": 421,
-      "y_pt": 322,
-      "font": "CormorantGaramond-Italic",
-      "font_weight": "medium",
-      "size_pt": 34,
-      "anchor": "center",
-      "color": "#2a2a2a"
+    "schema_version": 1,
+    "strategy": "pdf_overlay",
+    "pdf_template": "cert_template.pdf",
+    "page_size_pt": {
+        "width": 841.89,
+        "height": 595.28,
+        "orientation": "landscape (A4)"
     },
-    "date_of_certification": {
-      "x_pt": 299,
-      "y_pt": 167,
-      "font": "CormorantGaramond-Italic",
-      "size_pt": 12.5,
-      "anchor": "center",
-      "color": "#2a2a2a",
-      "format": "%-d %B %Y",
-      "empty_value": "—"
+    "font_files": [
+        "fonts/CormorantGaramond-VariableFont_wght.ttf",
+        "fonts/CormorantGaramond-Italic-VariableFont_wght.ttf",
+        "fonts/Inter-VariableFont_opsz-wght.ttf",
+        "fonts/GreatVibes-Regular.ttf"
+    ],
+    "overlay_fields": {
+        "recipient_name": {
+            "x_pt": 421,
+            "y_pt": 322,
+            "font": "CormorantGaramond-Italic",
+            "font_weight": "medium",
+            "size_pt": 34,
+            "anchor": "center",
+            "color": "#2a2a2a"
+        },
+        "date_of_certification": {
+            "x_pt": 299,
+            "y_pt": 167,
+            "font": "CormorantGaramond-Italic",
+            "size_pt": 12.5,
+            "anchor": "center",
+            "color": "#2a2a2a",
+            "format": "%-d %B %Y",
+            "empty_value": "—"
+        },
+        "date_of_last_renewal": {
+            "x_pt": 543,
+            "y_pt": 167,
+            "font": "CormorantGaramond-Italic",
+            "size_pt": 12.5,
+            "anchor": "center",
+            "color": "#2a2a2a",
+            "format": "%-d %B %Y",
+            "empty_value": "—",
+            "_note": "Populated only after the first re-attestation (PR3 — recertification feature, not yet built). Shows em-dash until then, matching the reference sample."
+        },
+        "signature_bilal": {
+            "x_pt": 111,
+            "y_pt": 98,
+            "font": "GreatVibes-Regular",
+            "size_pt": 21,
+            "anchor": "left",
+            "color": "#2a2a2a",
+            "text_source": "Bilal Musharraf (Founding Board Member, Indus Valley Yoga)",
+            "_note": "Rendered only once Bilal has attested this credential — blank (underline only) until then. Requires PR3's dual-signature flow; today's platform only supports single-attestation."
+        },
+        "signature_olivia": {
+            "x_pt": 619,
+            "y_pt": 98,
+            "font": "GreatVibes-Regular",
+            "size_pt": 21,
+            "anchor": "left",
+            "color": "#2a2a2a",
+            "text_source": "Olivia Anselmo (Creator, Original Hot Yoga Teacher Training, Liv for Yoga, LLC)",
+            "_note": "Same as signature_bilal — second, independent co-signer. Both required before this is a 'complete' IVY certificate per Bilal's design (2026-08-18 conversation)."
+        },
+        "qr": {
+            "x_pt": 400,
+            "y_pt": 71,
+            "size_pt": 42.5
+        },
+        "certificate_id": {
+            "x_pt": 421,
+            "y_pt": 55,
+            "font": "Inter",
+            "font_weight": "regular",
+            "size_pt": 6,
+            "anchor": "center",
+            "color": "#6a4a1a",
+            "format": "IVY-TT-{year}-{seq:04d}",
+            "_note": "Cosmetic ID scheme visible on the printed cert (e.g. IVY-TT-2027-0001), distinct from the platform's own pk_hash. No generator for this sequence exists yet in lineage-engine — needs a decision on where the per-year sequence counter lives before this field can render for real. Not blocking: the QR + pk_hash-based credential URL is still the source of truth for verification."
+        }
     },
-    "date_of_last_renewal": {
-      "x_pt": 543,
-      "y_pt": 167,
-      "font": "CormorantGaramond-Italic",
-      "size_pt": 12.5,
-      "anchor": "center",
-      "color": "#2a2a2a",
-      "format": "%-d %B %Y",
-      "empty_value": "—",
-      "_note": "Populated only after the first re-attestation (PR3 — recertification feature, not yet built). Shows em-dash until then, matching the reference sample."
-    },
-    "signature_bilal": {
-      "x_pt": 111,
-      "y_pt": 98,
-      "font": "GreatVibes-Regular",
-      "size_pt": 21,
-      "anchor": "left",
-      "color": "#2a2a2a",
-      "text_source": "Bilal Musharraf (Founding Board Member, Indus Valley Yoga)",
-      "_note": "Rendered only once Bilal has attested this credential — blank (underline only) until then. Requires PR3's dual-signature flow; today's platform only supports single-attestation."
-    },
-    "signature_olivia": {
-      "x_pt": 619,
-      "y_pt": 98,
-      "font": "GreatVibes-Regular",
-      "size_pt": 21,
-      "anchor": "left",
-      "color": "#2a2a2a",
-      "text_source": "Olivia Anselmo (Creator, Original Hot Yoga Teacher Training, Liv for Yoga, LLC)",
-      "_note": "Same as signature_bilal — second, independent co-signer. Both required before this is a 'complete' IVY certificate per Bilal's design (2026-08-18 conversation)."
-    },
-    "qr": {
-      "x_pt": 400,
-      "y_pt": 71,
-      "size_pt": 42.5
-    },
-    "certificate_id": {
-      "x_pt": 421,
-      "y_pt": 55,
-      "font": "Inter",
-      "font_weight": "regular",
-      "size_pt": 6,
-      "anchor": "center",
-      "color": "#6a4a1a",
-      "format": "IVY-TT-{year}-{seq:04d}",
-      "_note": "Cosmetic ID scheme visible on the printed cert (e.g. IVY-TT-2027-0001), distinct from the platform's own pk_hash. No generator for this sequence exists yet in lineage-engine — needs a decision on where the per-year sequence counter lives before this field can render for real. Not blocking: the QR + pk_hash-based credential URL is still the source of truth for verification."
-    }
-  },
-  "_comment": "Coordinates reverse-engineered 2026-08-18 by word/image bounding-box extraction (pdfplumber + pymupdf) from 'IVY certificate - blank - v1.2.pdf' and the filled 'IVY certificate - sample.pdf' Bilal/Shahbaz shared. PDF coordinate convention: origin bottom-left, y_pt measured from page bottom (standard PDF/reportlab space) — pdfplumber's top-down 'top'/'bottom' values were converted via y_pt = page_height - center_of(top, bottom). x_pt/y_pt represent the anchor point per each field's 'anchor' (center fields use bbox center; left-anchored signature fields use the bbox's left edge, matching the underline they sit above). Fonts identified via embedded PDF font-subset names (CG = Cormorant Garamond, IN = Inter, GV = Great Vibes) and confirmed against the canonical files in github.com/google/fonts — all three are open-source (OFL), full family files vendored in fonts/ rather than the PDF's subsetted glyphs. signature_bilal/signature_olivia and certificate_id are NEW overlay field types beyond what lineage-engine's current cert_overlay.py renderer supports (butterfly-effect only needed recipient_name + date + qr) — wiring them up is PR3 in agentic_ai_context/plans/IVY_YOGA_COHORT_ONBOARDING_PLAN.md, gated on Gary's two open design decisions there. This config documents the target design now so PR3 has exact coordinates to implement against."
+    "_comment": "Coordinates reverse-engineered 2026-08-18 by word/image bounding-box extraction (template updated 2026-08-20: wording “200 hours” (dropped “more than”), body reflow; overlay coordinates unchanged) (pdfplumber + pymupdf) from 'IVY certificate - blank - v1.3.pdf' and the filled 'IVY certificate - sample.pdf' Bilal/Shahbaz shared. PDF coordinate convention: origin bottom-left, y_pt measured from page bottom (standard PDF/reportlab space) — pdfplumber's top-down 'top'/'bottom' values were converted via y_pt = page_height - center_of(top, bottom). x_pt/y_pt represent the anchor point per each field's 'anchor' (center fields use bbox center; left-anchored signature fields use the bbox's left edge, matching the underline they sit above). Fonts identified via embedded PDF font-subset names (CG = Cormorant Garamond, IN = Inter, GV = Great Vibes) and confirmed against the canonical files in github.com/google/fonts — all three are open-source (OFL), full family files vendored in fonts/ rather than the PDF's subsetted glyphs. signature_bilal/signature_olivia and certificate_id are NEW overlay field types beyond what lineage-engine's current cert_overlay.py renderer supports (butterfly-effect only needed recipient_name + date + qr) — wiring them up is PR3 in agentic_ai_context/plans/IVY_YOGA_COHORT_ONBOARDING_PLAN.md, gated on Gary's two open design decisions there. This config documents the target design now so PR3 has exact coordinates to implement against."
 }

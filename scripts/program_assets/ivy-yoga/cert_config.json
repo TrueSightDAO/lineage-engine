@@ -52,7 +52,9 @@
             "anchor": "left",
             "color": "#2a2a2a",
             "text_source": "Bilal Musharraf (Founding Board Member, Indus Valley Yoga)",
-            "_note": "Rendered only once Bilal has attested this credential — blank (underline only) until then. Requires PR3's dual-signature flow; today's platform only supports single-attestation."
+            "_note": "Rendered only once Bilal has attested this credential — blank (underline only) until then. Requires PR3's dual-signature flow; today's platform only supports single-attestation.",
+            "text": "Bilal Musharraf",
+            "max_width_pt": 230
         },
         "signature_olivia": {
             "x_pt": 619,
@@ -62,7 +64,9 @@
             "anchor": "left",
             "color": "#2a2a2a",
             "text_source": "Olivia Anselmo (Creator, Original Hot Yoga Teacher Training, Liv for Yoga, LLC)",
-            "_note": "Same as signature_bilal — second, independent co-signer. Both required before this is a 'complete' IVY certificate per Bilal's design (2026-08-18 conversation)."
+            "_note": "Same as signature_bilal — second, independent co-signer. Both required before this is a 'complete' IVY certificate per Bilal's design (2026-08-18 conversation).",
+            "text": "Olivia Anselmo",
+            "max_width_pt": 230
         },
         "qr": {
             "x_pt": 400,

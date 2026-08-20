@@ -85,7 +85,7 @@ def _build_overlay_canvas(
 
     def _draw_text(field_key: str, text: str) -> None:
         f = fields.get(field_key)
-        if not f:
+        if not f or not text:
             return
         spec = OverlayField(
             x_pt=float(f.get("x_pt", 0)),
@@ -116,15 +116,36 @@ def _build_overlay_canvas(
     # 1) Recipient name
     _draw_text("recipient_name", recipient_name or "")
 
-    # 2) Date (strftime against issued_at; default ISO if no format spec)
-    date_field = fields.get("date") or {}
-    date_format = date_field.get("format") or "%Y-%m-%d"
-    try:
-        date_text = issued_at.strftime(date_format)
-    except Exception:
-        # macOS / Linux divergence on %-d etc. — fall back to a safe pattern.
-        date_text = issued_at.strftime("%d %B %Y")
-    _draw_text("date", date_text)
+    # 2) Date fields. Legacy key is `date` (butterfly-effect); IVY uses
+    #    `date_of_certification`. Both render issued_at through strftime
+    #    (default ISO when no format spec is declared).
+    for date_key in ("date", "date_of_certification"):
+        date_field = fields.get(date_key)
+        if not date_field:
+            continue
+        date_format = date_field.get("format") or "%Y-%m-%d"
+        try:
+            date_text = issued_at.strftime(date_format)
+        except Exception:
+            # macOS / Linux divergence on %-d etc. — fall back to a safe pattern.
+            date_text = issued_at.strftime("%d %B %Y")
+        _draw_text(date_key, date_text)
+
+    # 2b) date_of_last_renewal — populated only after the first
+    #     re-attestation (Phase 3b recertification). Until then render the
+    #     config's empty_value (IVY: em-dash) so the printed field reads
+    #     deliberately blank rather than showing today's date.
+    renewal_field = fields.get("date_of_last_renewal")
+    if renewal_field:
+        _draw_text("date_of_last_renewal", renewal_field.get("empty_value", ""))
+
+    # 2c) Co-signature + certificate-id fields. These render only once the
+    #     corresponding attester has attested (Phase 3b dual-signature —
+    #     not built yet); until then draw nothing so the template's own
+    #     underline / placeholder shows through.
+    for sig_key in ("signature_bilal", "signature_olivia", "certificate_id"):
+        if sig_key in fields:
+            _draw_text(sig_key, "")
 
     # 3) QR (if a path was provided and the field is declared)
     qr_field = fields.get("qr")

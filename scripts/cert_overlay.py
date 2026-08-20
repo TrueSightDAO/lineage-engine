@@ -145,7 +145,10 @@ def _build_overlay_canvas(
     #     underline / placeholder shows through.
     for sig_key in ("signature_bilal", "signature_olivia", "certificate_id"):
         if sig_key in fields:
-            _draw_text(sig_key, "")
+            sig_text = fields[sig_key].get("text") or fields[sig_key].get("text_source", "")
+            if sig_key == "certificate_id":
+                sig_text = ""
+            _draw_text(sig_key, sig_text)
 
     # 3) QR (if a path was provided and the field is declared)
     qr_field = fields.get("qr")

@@ -7,6 +7,9 @@
     },
     "butterfly-effect": {
       "data_program_slugs": ["butterfly-effect"]
+    },
+    "ivy-yoga": {
+      "data_program_slugs": ["ivy-yoga"]
     }
   }
 }

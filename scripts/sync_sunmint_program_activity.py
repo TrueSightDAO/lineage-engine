@@ -82,8 +82,20 @@ def derive_pk_hash(public_key_b64: str) -> str:
     """
     if not public_key_b64:
         return ""
+    key = public_key_b64.strip()
+    # Some writers (the Edgar API submission path) persist the key PEM-armoured
+    # ("-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----") rather than
+    # as bare base64 SPKI DER. Both encode the SAME DER bytes, so strip the
+    # armour before decoding -- otherwise b64decode raises "Incorrect padding"
+    # and every such event is silently dropped (0 attributable).
+    if "-----BEGIN" in key:
+        key = "".join(
+            line
+            for line in key.splitlines()
+            if line.strip() and not line.strip().startswith("-----")
+        )
     try:
-        decoded = base64.b64decode(public_key_b64)
+        decoded = base64.b64decode(key)
     except (ValueError, TypeError):
         return ""
     digest = hashlib.sha256(decoded).digest()

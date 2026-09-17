@@ -34,6 +34,18 @@ def test_derive_pk_hash_empty_is_blank():
     assert derive_pk_hash("") == ""
 
 
+def test_derive_pk_hash_accepts_pem_armoured_key():
+    # The Edgar API submission path persists the key PEM-armoured. The SAME DER
+    # bytes must hash identically to the bare base64 SPKI form, or the event is
+    # silently dropped (0 attributable) during attribution.
+    import textwrap
+
+    body = "\n".join(textwrap.wrap(_REAL_PK, 64))
+    pem = "-----BEGIN PUBLIC KEY-----\n" + body + "\n-----END PUBLIC KEY-----\n"
+    assert derive_pk_hash(pem) == "pk-eIdKUyv9Hc2-"
+    assert derive_pk_hash(pem) == derive_pk_hash(_REAL_PK)
+
+
 def test_parse_submission_source_url():
     text = "[TREE PLANTING EVENT]\n- Latitude: 1.0\nSubmission Source: https://cfr.truesight.me\n--------\n"
     assert parse_submission_source(text) == "https://cfr.truesight.me"

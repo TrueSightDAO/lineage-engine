@@ -1,0 +1,8 @@
+{
+  "_comment": "Maps a SunMint event's `Submission Source` host to a lineage-credentials program slug. Option B attribution: an event belongs to a program when the host serving the submission matches one of its registered domains. Add a domain->slug pair here when a new program vendors the SunMint app.",
+  "schema_version": 1,
+  "hosts": {
+    "cfr.truesight.me": "crf-anapu",
+    "beta.cfr.truesight.me": "crf-anapu"
+  }
+}

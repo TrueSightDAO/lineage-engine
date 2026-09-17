@@ -52,6 +52,36 @@ python scripts/fetch_contributions.py 'Fatima Toledo'
 
 This script was migrated from `tokenomics/python_scripts/reference_and_testimonials/` on 2026-05-14 as part of the lineage-credentials platform consolidation. The MVP cache builder (forthcoming `scripts/build_cv_cache.py`) wraps this primitive.
 
+### `scripts/sync_sunmint_program_activity.py`
+
+Syncs SunMint program activity (tree plantings, growth-monitoring visits, plot
+registrations) from the public per-event attestation ledger
+[`verify_public_signatures`](https://github.com/TrueSightDAO/verify_public_signatures)
+into this repo's **data** sibling, `lineage-credentials`, as::
+
+    programs/<slug>/pk-<hash>/sunmint/<msg_id>.json
+
+Attribution is **Option B**: an event belongs to a program when the host in its
+signed payload's `Submission Source` line matches a domain registered in
+`scripts/sunmint_program_registry.json` (e.g. `cfr.truesight.me` -> `crf-anapu`).
+The `sunmint/` subfolder is deliberately **not** `practice/`, so capoeira's
+`practice_count` / `total_practice_minutes` semantics are never polluted by tree
+data.
+
+The pk-hash uses the canonical primitive shared by the browser, the GAS
+`program_admin_endpoint.js`, and `build_cv_cache.py`::
+
+    pk-<hash> = 'pk-' + first 12 chars of base64url(SHA-256(base64-decoded pubkey))
+
+Runs **dry-run by default** (standing convention for new write scripts)::
+
+    python3 scripts/sync_sunmint_program_activity.py --dry-run
+    GITHUB_TOKEN=... python3 scripts/sync_sunmint_program_activity.py --push
+
+Idempotent + content-addressed: each file's exact bytes are hashed to a git-blob
+sha and compared against the remote file's sha, so re-runs skip unchanged events
+(same skip posture as `sync_sunmint_signatures.py`).
+
 ## Status
 
 - **2026-05-14** — repo seeded with the migrated testimonial generator. `build_cv_cache.py`, Grok prompts, and PDF templates land in subsequent PRs.

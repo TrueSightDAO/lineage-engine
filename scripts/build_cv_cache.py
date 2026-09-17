@@ -280,6 +280,41 @@ def write_json(path: Path, obj: Any) -> None:
 # practice-events aggregation
 # ---------------------------------------------------------------------------
 
+
+def _program_modes(manifest: dict[str, Any]) -> list[str]:
+    """Program mode(s) for a program, tolerant of both manifest shapes.
+
+    New shape (plan CRF_ANAPU_SUNMINT_COHORT_PROPOSAL.md 2.2 point 5 /
+    section 6 decision #4): a non-exclusive ``program_modes`` array so a program
+    can be BOTH a credentialing cohort AND a SunMint cohort at once. Legacy
+    shape: a single ``program_mode`` string (still present on every shipped
+    manifest). Returns a list either way; an empty list when neither is set.
+    """
+    modes = manifest.get('program_modes')
+    if isinstance(modes, list):
+        return [str(m) for m in modes if m]
+    single = manifest.get('program_mode')
+    return [str(single)] if single else []
+
+
+def program_activity_score(program_rec: dict[str, Any]) -> tuple[int, int]:
+    """Ranking key for a program's activity -- practice AND SunMint.
+
+    A program with SunMint activity but zero practice events must outrank an
+    entirely empty program, so a tree-only contributor (a CRF Anapu student who
+    has only submitted tree plantings, no capoeira practice) still resolves a
+    sensible ``primary_program`` and is never silently dropped from
+    ``_cache/index.json``. The tuple stays 2-wide so existing callers that
+    compare or sort on it keep working. See plan section 2.2 point 4.
+    """
+    practice_count = int(program_rec.get('practice_count') or 0)
+    sunmint_count = int(program_rec.get('sunmint_event_count') or 0)
+    return (
+        practice_count + sunmint_count,
+        int(program_rec.get('total_practice_minutes') or 0),
+    )
+
+
 def collect_practitioners(data_root: Path) -> dict[str, dict[str, Any]]:
     """Walk programs/*/pk-*/ and return one record per pk-hash."""
     practitioners: dict[str, dict[str, Any]] = {}
@@ -309,6 +344,36 @@ def collect_practitioners(data_root: Path) -> dict[str, dict[str, Any]]:
                     if e is not None:
                         events.append({**e, '_path': str(f.relative_to(data_root))})
 
+            # SunMint activity kind (new, non-`practice`): tree plantings,
+            # growth-monitoring visits, plot/boundary registrations written by
+            # scripts/sync_sunmint_program_activity.py. Kept in its own folder
+            # and counted separately so capoeira's practice_count /
+            # total_practice_minutes semantics are never polluted by tree data
+            # (plan sections 1.4 / 2.2).
+            sunmint_dir = pk_dir / 'sunmint'
+            sunmint_events = []
+            if sunmint_dir.is_dir():
+                for f in sorted(sunmint_dir.glob('*.json')):
+                    e = read_json(f)
+                    if e is not None:
+                        sunmint_events.append({**e, '_path': str(f.relative_to(data_root))})
+
+            def _sunmint_kind(e):
+                return (e.get('activity_type') or e.get('event_type') or '').strip()
+
+            trees_planted = sum(1 for e in sunmint_events if _sunmint_kind(e) == 'tree_planting')
+            monitoring_events = sum(
+                1 for e in sunmint_events if _sunmint_kind(e) == 'tree_growth_monitoring'
+            )
+            plots_registered = sum(
+                1 for e in sunmint_events if _sunmint_kind(e) == 'farm_boundary_evidence'
+            )
+            last_sunmint_activity = ''
+            for e in sunmint_events:
+                ts = e.get('submitted_at') or e.get('captured_at') or ''
+                if ts > last_sunmint_activity:
+                    last_sunmint_activity = ts
+
             rec['programs'][program] = {
                 'display_name': manifest.get('display_name', program),
                 'lineage_root': manifest.get('lineage_root'),
@@ -322,6 +387,13 @@ def collect_practitioners(data_root: Path) -> dict[str, dict[str, Any]]:
                 'total_practice_minutes': sum(
                     (e.get('payload') or {}).get('total_practice_minutes', 0) for e in events
                 ),
+                'program_modes': _program_modes(manifest),
+                'sunmint_events': sunmint_events,
+                'sunmint_event_count': len(sunmint_events),
+                'trees_planted_count': trees_planted,
+                'monitoring_events_count': monitoring_events,
+                'plots_registered_count': plots_registered,
+                'last_sunmint_activity_at': last_sunmint_activity,
             }
     return practitioners
 
@@ -450,18 +522,40 @@ def build_unified_cv(
         'pk_hash': (pk_record or {}).get('pk_hash'),
         'identity': identity,
         'generated_at': now_utc_iso(),
-        'has_elective_records': bool(programs and any(p['practice_count'] for p in programs.values())),
+        'has_elective_records': bool(
+            programs
+            and any(
+                (p.get('practice_count') or p.get('sunmint_event_count'))
+                for p in programs.values()
+            )
+        ),
         'has_dao_contributions': bool(preserved),
         'programs': {
             name: {
                 'display_name': p['display_name'],
                 'lineage_root': p['lineage_root'],
                 'source_pages': p.get('source_pages') or [],
+                'program_modes': p.get('program_modes') or [],
                 'practice_count': p['practice_count'],
                 'total_practice_minutes': p['total_practice_minutes'],
                 'recent_events': sorted(
                     p['practice_events'],
                     key=lambda e: (e.get('captured_at') or ''),
+                    reverse=True,
+                )[:20],
+                # SunMint activity kind (trees / monitoring / plots) -- surfaced
+                # as aggregate counts for members.html badges (plan 2.2 pt 5)
+                # plus the itemized events for the click-through renderer
+                # (plan 2.2 pt 6). Kept separate from recent_events so the
+                # practice semantics stay clean.
+                'sunmint_event_count': p.get('sunmint_event_count') or 0,
+                'trees_planted_count': p.get('trees_planted_count') or 0,
+                'monitoring_events_count': p.get('monitoring_events_count') or 0,
+                'plots_registered_count': p.get('plots_registered_count') or 0,
+                'last_sunmint_activity_at': p.get('last_sunmint_activity_at') or '',
+                'sunmint_events': sorted(
+                    p.get('sunmint_events') or [],
+                    key=lambda e: (e.get('submitted_at') or e.get('captured_at') or ''),
                     reverse=True,
                 )[:20],
             }
@@ -544,8 +638,16 @@ def render_markdown(cv: dict[str, Any]) -> str:
     for program_name, p in cv.get('programs', {}).items():
         lines.append(f"## {p['display_name']}")
         lines.append('')
-        lines.append(f"- Practice sessions logged: **{p['practice_count']}**")
-        lines.append(f"- Total practice time: **{p['total_practice_minutes']} minutes**")
+        # Practice lines only when there ARE practice events -- a SunMint-only
+        # program must never render "Total practice time: 0 minutes" on a
+        # farmer's page (plan section 1.4).
+        if p.get('practice_count'):
+            lines.append(f"- Practice sessions logged: **{p['practice_count']}**")
+            lines.append(f"- Total practice time: **{p['total_practice_minutes']} minutes**")
+        if p.get('sunmint_event_count'):
+            lines.append(f"- Trees planted: **{p.get('trees_planted_count', 0)}**")
+            lines.append(f"- Monitoring visits: **{p.get('monitoring_events_count', 0)}**")
+            lines.append(f"- Plots registered: **{p.get('plots_registered_count', 0)}**")
         if p.get('lineage_root'):
             lines.append(f"- Lineage root: {p['lineage_root']}")
         if p['recent_events']:
@@ -558,6 +660,15 @@ def render_markdown(cv: dict[str, Any]) -> str:
                 src = e.get('_path', '')
                 src_link = f"[{src}](https://github.com/TrueSightDAO/lineage-credentials/blob/main/{src})" if src else ''
                 lines.append(f"- **{cap}** — {theme} ({mins} min) — {src_link}")
+        if p.get('sunmint_events'):
+            lines.append('')
+            lines.append('### SunMint activity')
+            for e in p['sunmint_events'][:10]:
+                kind = (e.get('activity_type') or e.get('event_type') or '').replace('_', ' ')
+                when = e.get('submitted_at') or e.get('captured_at') or '?'
+                src = e.get('_path', '')
+                src_link = f"[{src}](https://github.com/TrueSightDAO/lineage-credentials/blob/main/{src})" if src else ''
+                lines.append(f"- **{when}** — {kind} — {src_link}")
         lines.append('')
 
     if not cv.get('has_dao_contributions') and not cv.get('programs'):
@@ -882,11 +993,7 @@ def build(data_root: Path, write_pdfs: bool = True, write_narratives: bool = Tru
         programs_dict = cv.get('programs') or {}
         program_slugs = list(programs_dict.keys())
         def _program_activity_score(name: str) -> tuple[int, int]:
-            rec = programs_dict.get(name) or {}
-            return (
-                int(rec.get('practice_count') or 0),
-                int(rec.get('total_practice_minutes') or 0),
-            )
+            return program_activity_score(programs_dict.get(name) or {})
         primary_program = None
         if program_slugs:
             primary_program = sorted(program_slugs, key=lambda n: _program_activity_score(n), reverse=True)[0]

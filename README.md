@@ -82,6 +82,27 @@ Idempotent + content-addressed: each file's exact bytes are hashed to a git-blob
 sha and compared against the remote file's sha, so re-runs skip unchanged events
 (same skip posture as `sync_sunmint_signatures.py`).
 
+### `scripts/build_cv_cache.py` — SunMint activity kind
+
+`build_cv_cache.py` folds two activity kinds into each per-program CV record:
+
+- **Practice** (`programs/<slug>/pk-<hash>/practice/*.json`) — the capoeira-style
+  events that drive `practice_count` / `total_practice_minutes`.
+- **SunMint** (`programs/<slug>/pk-<hash>/sunmint/*.json`, written by
+  `sync_sunmint_program_activity.py`) — tree plantings, growth-monitoring visits
+  and plot/boundary registrations. Aggregated into `trees_planted_count`,
+  `monitoring_events_count`, `plots_registered_count`, `sunmint_event_count`
+  and `last_sunmint_activity_at` (plus the itemized `sunmint_events` for the
+  click-through renderer). The two kinds stay **separate** so a tree-only
+  contributor never renders a nonsensical "Total practice time: 0 minutes".
+
+`_program_modes(manifest)` tolerates **both** manifest shapes: the new
+non-exclusive `program_modes` array (a program can be both a credentialing
+cohort *and* a SunMint cohort) and the legacy single `program_mode` string.
+`program_activity_score()` counts SunMint activity too, so a student with only
+tree plantings still resolves a `primary_program` and is never silently dropped
+from `_cache/index.json`.
+
 ## Status
 
 - **2026-05-14** — repo seeded with the migrated testimonial generator. `build_cv_cache.py`, Grok prompts, and PDF templates land in subsequent PRs.

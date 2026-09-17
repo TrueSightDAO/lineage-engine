@@ -139,3 +139,94 @@ def test_render_markdown_omits_zero_practice_line_for_sunmint_only(tmp_path):
     assert "Monitoring visits: **1**" in md
     assert "### SunMint activity" in md
     assert "tree planting" in md
+
+
+def test_member_sunmint_aggregate_sums_across_programs():
+    from scripts.build_cv_cache import member_sunmint_aggregate
+
+    agg = member_sunmint_aggregate(
+        {
+            "crf-anapu": {
+                "trees_planted_count": 2,
+                "plots_registered_count": 1,
+                "last_sunmint_activity_at": "2026-09-10T10:00:00Z",
+            },
+            "butterfly-effect": {
+                "trees_planted_count": 1,
+                "plots_registered_count": 0,
+                "last_sunmint_activity_at": "2026-09-12T10:00:00Z",
+            },
+        }
+    )
+    assert agg["sunmint_trees_planted"] == 3
+    assert agg["sunmint_plots_registered"] == 1
+    assert agg["sunmint_last_activity_at"] == "2026-09-12T10:00:00Z"
+
+
+def test_member_sunmint_aggregate_empty_and_missing_keys():
+    from scripts.build_cv_cache import member_sunmint_aggregate
+
+    assert member_sunmint_aggregate({}) == {
+        "sunmint_trees_planted": 0,
+        "sunmint_plots_registered": 0,
+        "sunmint_last_activity_at": "",
+    }
+    # a program record with no SunMint keys must not raise
+    assert member_sunmint_aggregate({"x": {}})["sunmint_trees_planted"] == 0
+
+
+def test_member_sunmint_aggregate_matches_flat_keys_used_by_renderer():
+    """member_sunmint_aggregate() emits exactly the keys program-shell.js reads.
+
+    js/program-shell.js:296-298 reads flat ``sunmint_trees_planted`` /
+    ``sunmint_plots_registered`` / ``sunmint_last_activity_at`` off the member
+    record. Guard the aggregate's key names + types against renderer drift.
+    """
+    from scripts.build_cv_cache import member_sunmint_aggregate
+
+    agg = member_sunmint_aggregate({})
+    assert set(agg) == {
+        "sunmint_trees_planted",
+        "sunmint_plots_registered",
+        "sunmint_last_activity_at",
+    }
+    assert agg == {
+        "sunmint_trees_planted": 0,
+        "sunmint_plots_registered": 0,
+        "sunmint_last_activity_at": "",
+    }
+
+
+def test_build_surfaces_flat_sunmint_fields_on_index_members(tmp_path):
+    """End-to-end: build() writes flat sunmint_* keys onto _cache/index.json members.
+
+    This is the real PR5 regression guard. The renderer (truesight_me_beta #381 /
+    the crf-anapu mirror) reads flat per-member fields off the directory index;
+    if build() stops surfacing member_sunmint_aggregate() the badges silently go
+    dead. Call build() for real and assert the seeded tree/plot counts land.
+    """
+    from scripts.build_cv_cache import build
+
+    root = tmp_path / "lineage-credentials"
+    _seed_program(
+        root,
+        "crf-anapu",
+        "pk-TESTHASH1",
+        sunmint=[
+            {"activity_type": "tree_planting", "submitted_at": "2026-09-10T00:00:00Z"},
+            {"activity_type": "tree_planting", "submitted_at": "2026-09-11T00:00:00Z"},
+            {"activity_type": "farm_boundary_evidence", "submitted_at": "2026-09-12T00:00:00Z"},
+        ],
+    )
+    build(root, write_pdfs=False, write_narratives=False)
+
+    index = json.loads((root / "_cache" / "index.json").read_text(encoding="utf-8"))
+    members = [m for m in index["members"] if m.get("display_name") == "Test Student"]
+    assert members, "seeded student must appear in the directory index"
+    m = members[0]
+    # the exact keys + values js/program-shell.js:296-298 renders
+    assert m["sunmint_trees_planted"] == 2
+    assert m["sunmint_plots_registered"] == 1
+    assert m["sunmint_last_activity_at"] == "2026-09-12T00:00:00Z"
+    # uniform shape: EVERY member carries the keys (badges read a stable shape)
+    assert all("sunmint_trees_planted" in mem for mem in index["members"])

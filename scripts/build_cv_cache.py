@@ -315,6 +315,33 @@ def program_activity_score(program_rec: dict[str, Any]) -> tuple[int, int]:
     )
 
 
+def member_sunmint_aggregate(programs: dict[str, Any]) -> dict[str, Any]:
+    """Flat per-member SunMint aggregates for ``_cache/index.json``.
+
+    ``members.html`` cards (js/program-shell.js, plan section 2.2 point 5) read
+    flat ``sunmint_trees_planted`` / ``sunmint_plots_registered`` /
+    ``sunmint_last_activity_at`` fields off the directory index record -- not the
+    nested per-program CV shape. A member can hold SunMint activity in more than
+    one program, so aggregate across all of them: counts sum, the timestamp is
+    the max (most recent). Returns zeros / '' when there is no SunMint activity,
+    which the renderer treats as "hide the badge".
+    """
+    trees = 0
+    plots = 0
+    last = ''
+    for rec in (programs or {}).values():
+        trees += int(rec.get('trees_planted_count') or 0)
+        plots += int(rec.get('plots_registered_count') or 0)
+        ts = rec.get('last_sunmint_activity_at') or ''
+        if ts > last:
+            last = ts
+    return {
+        'sunmint_trees_planted': trees,
+        'sunmint_plots_registered': plots,
+        'sunmint_last_activity_at': last,
+    }
+
+
 def collect_practitioners(data_root: Path) -> dict[str, dict[str, Any]]:
     """Walk programs/*/pk-*/ and return one record per pk-hash."""
     practitioners: dict[str, dict[str, Any]] = {}
@@ -1034,6 +1061,8 @@ def build(data_root: Path, write_pdfs: bool = True, write_narratives: bool = Tru
             'total_tdg_controlled': _safe_float(live_tdg) if live_tdg is not None and str(live_tdg).strip() else (dc_summary.get('total_tdg_issued') or 0),
             'total_contributions': dc_summary.get('total_contributions') or 0,
             'last_updated': cv['generated_at'],
+            # Flat SunMint aggregates for members.html cards (plan 2.2 pt 5).
+            **member_sunmint_aggregate(programs_dict),
         })
 
     # Merge sentinel entries from dao_members.json — members flagged as
@@ -1110,6 +1139,14 @@ def build(data_root: Path, write_pdfs: bool = True, write_narratives: bool = Tru
                 'total_contributions': 0,
                 'last_updated': '',
             })
+
+    # Every member record carries the flat SunMint aggregate keys so
+    # js/program-shell.js badges read a uniform shape; synthetic sentinel /
+    # orphan entries (which have no CV) get zeros. Plan section 2.2 point 5.
+    for m in members:
+        m.setdefault('sunmint_trees_planted', 0)
+        m.setdefault('sunmint_plots_registered', 0)
+        m.setdefault('sunmint_last_activity_at', '')
 
     write_json(data_root / '_cache' / 'index.json', {
         'generated_at': now_utc_iso(),
